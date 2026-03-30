@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw Control</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { overflow-x: hidden; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0f1117;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            text-align: center;
+            max-width: 560px;
+            width: 90%;
+        }
+
+        .logo {
+            font-size: 64px;
+            margin-bottom: 16px;
+            user-select: none;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-8px); }
+        }
+
+        .title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 36px;
+        }
+
+        .versions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .version-btn {
+            background: #1a1d27;
+            border: 1px solid #2a2a3a;
+            border-radius: 12px;
+            padding: 20px 16px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: left;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .version-btn:hover {
+            background: #22253a;
+            border-color: #444;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        }
+
+        .version-btn[data-version="v1"] {
+            border-color: #22c55e40;
+        }
+        .version-btn[data-version="v1"]:hover {
+            border-color: #22c55e;
+        }
+
+        .version-tag {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 4px;
+        }
+
+        .version-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .version-desc {
+            font-size: 12px;
+            color: #555;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
+        .badge-default {
+            background: #22c55e20;
+            color: #22c55e;
+            border: 1px solid #22c55e40;
+        }
+
+        .reset-link {
+            font-size: 11px;
+            color: #555;
+            cursor: pointer;
+            text-decoration: underline;
+            transition: color 0.15s;
+            background: none;
+            border: none;
+            font-family: inherit;
+        }
+        .reset-link:hover { color: #888; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">&#129438;</div>
+        <div class="title">OpenClaw Control</div>
+        <div class="subtitle">Choose your interface version</div>
+
+        <div class="versions">
+            <div class="version-btn" data-version="classic">
+                <div class="version-tag">Classic</div>
+                <div class="version-label">Official SPA</div>
+                <div class="version-desc">Original bundled interface</div>
+            </div>
+            <div class="version-btn" data-version="dark">
+                <div class="version-tag">Dark <span class="badge badge-default">DEFAULT</span></div>
+                <div class="version-label">GitHub Theme</div>
+                <div class="version-desc">4-column dark layout with activity panel</div>
+            </div>
+            <div class="version-btn" data-version="light">
+                <div class="version-tag">Light</div>
+                <div class="version-label">Clean Theme</div>
+                <div class="version-desc">2-panel light layout with live context</div>
+            </div>
+            <div class="version-btn" data-version="retro">
+                <div class="version-tag">Retro</div>
+                <div class="version-label">Pixel Art</div>
+                <div class="version-desc">RPG terminal with CRT effects</div>
+            </div>
+        </div>
+
+        <button class="reset-link" id="reset-pref">Reset to show this screen every time</button>
+    </div>
+
+    <script>
+    (function() {
+        'use strict';
+
+        var versionMap = {
+            'classic': './index-original.html',
+            'Classic': './index-original.html',
+            'dark': './dark.html',
+            'Dark': './dark.html',
+            'light': './light.html',
+            'Light': './light.html',
+            'retro': './retro.html',
+            'Retro': './retro.html',
+            // Legacy mappings
+            'v0': './index-original.html', 'V0': './index-original.html',
+            'v1': './dark.html', 'V1': './dark.html',
+            'v7': './light.html', 'V7': './light.html',
+            'v9': './retro.html', 'V9': './retro.html'
+        };
+
+        // Extract token from URL hash (#token=...)
+        var hash = window.location.hash.slice(1);
+        if (hash) {
+            var params = new URLSearchParams(hash);
+            var t = params.get('token');
+            if (t) {
+                try { localStorage.setItem('oc_token', t); } catch(e) {}
+            }
+        }
+
+        // Also check query string
+        var qp = new URLSearchParams(window.location.search);
+        var qt = qp.get('token') || qp.get('t');
+        if (qt) {
+            try { localStorage.setItem('oc_token', qt); } catch(e) {}
+        }
+
+        // Auto-redirect to saved preference
+        try {
+            var saved = localStorage.getItem('openclawUIVersion');
+            if (saved && versionMap[saved]) {
+                window.location.href = versionMap[saved];
+                return;
+            }
+        } catch(e) {}
+
+        // Version buttons
+        var btns = document.querySelectorAll('.version-btn');
+        btns.forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var v = btn.getAttribute('data-version');
+                if (v && versionMap[v]) {
+                    try { localStorage.setItem('openclawUIVersion', v); } catch(e) {}
+                    window.location.href = versionMap[v];
+                }
+            });
+        });
+
+        // Reset preference
+        document.getElementById('reset-pref').addEventListener('click', function() {
+            try { localStorage.removeItem('openclawUIVersion'); } catch(e) {}
+            this.textContent = 'Preference cleared!';
+            var self = this;
+            setTimeout(function() { self.textContent = 'Reset to show this screen every time'; }, 2000);
+        });
+    })();
+    </script>
+</body>
+</html>

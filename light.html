@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw v7 - Clean Light Theme</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, * { overflow-x: hidden; }
+        pre, code, td, th, .message-content, p, div { overflow-wrap: break-word; word-wrap: break-word; word-break: break-word; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f8f9fa;
+            color: #1a1a1a;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #10a37f; }
+        * { scrollbar-width: thin; scrollbar-color: #d1d5db #f8f9fa; }
+
+        /* 2-column grid: chat | artifact/activity */
+        .app {
+            height: 100vh;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            overflow: hidden;
+        }
+
+        /* ── Chat Panel ── */
+        .chat-panel {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+            background: #fff;
+            border-right: 1px solid #e5e7eb;
+        }
+
+        .chat-header {
+            padding: 12px 20px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #fff;
+        }
+
+        .chat-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .chat-logo {
+            font-size: 24px;
+            user-select: none;
+        }
+
+        .chat-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #1a1a1a;
+        }
+
+        #oc-model-subtitle {
+            font-size: 11px;
+            color: #10a37f;
+            background: #ecfdf5;
+            padding: 2px 8px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.15s;
+        }
+        #oc-model-subtitle:hover { background: #d1fae5; }
+
+        /* Version Switcher */
+        .vsw {
+            display: flex;
+            gap: 2px;
+            margin-left: 8px;
+        }
+        .vsw a {
+            padding: 2px 6px;
+            font-size: 9px;
+            color: #999;
+            background: transparent;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+        .vsw a:hover { background: #f3f4f6; color: #555; border-color: #d1d5db; }
+        .vsw a.current { background: #10a37f; color: #fff; border-color: #10a37f; }
+
+        .chat-header-right {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .header-btn {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            color: #666;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .header-btn:hover { background: #f3f4f6; color: #333; border-color: #d1d5db; }
+
+        /* Context Bar */
+        .context-bar {
+            padding: 8px 20px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-size: 11px;
+            color: #888;
+            background: #fafbfc;
+        }
+
+        .stat-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .stat-label { color: #999; font-weight: 500; }
+        .stat-value { color: #555; font-weight: 500; }
+
+        /* Messages Area */
+        #oc-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            min-height: 0;
+        }
+
+        .message {
+            margin-bottom: 16px;
+            animation: fadeIn 0.2s ease;
+        }
+
+        .message.user .message-header { justify-content: flex-end; }
+        .message.user .message-content { background: #eef2ff; border-radius: 8px; padding: 10px 14px; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+
+        .avatar {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            flex-shrink: 0;
+            background: #10a37f;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .avatar.user {
+            background: #3b82f6;
+        }
+
+        .message-author {
+            font-size: 13px;
+            font-weight: 600;
+            color: #1a1a1a;
+        }
+
+        .message-content {
+            font-size: 14px;
+            line-height: 1.7;
+            color: #333;
+            padding-left: 36px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        /* Input Area */
+        .input-area {
+            padding: 16px 20px;
+            border-top: 1px solid #e5e7eb;
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+            background: #fff;
+        }
+
+        #oc-input {
+            flex: 1;
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 12px 16px;
+            color: #1a1a1a;
+            font-size: 14px;
+            font-family: inherit;
+            resize: none;
+            min-height: 44px;
+            max-height: 200px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+        #oc-input:focus { border-color: #10a37f; }
+        #oc-input::placeholder { color: #aaa; }
+
+        #oc-send {
+            width: 44px;
+            height: 44px;
+            border: none;
+            border-radius: 10px;
+            background: #10a37f;
+            color: #fff;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: background 0.15s, transform 0.1s;
+        }
+        #oc-send:hover { background: #0d8c6d; }
+        #oc-send:active { transform: scale(0.95); }
+        #oc-send.oc-abort-mode { background: #ef4444; }
+
+        /* ── Panel edge toggle buttons ── */
+        .panel-edge-btn {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 48px;
+            background: #f3f4f6;
+            border: 1px solid #d1d5db;
+            color: #999;
+            font-size: 11px;
+            cursor: pointer;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+            padding: 0;
+            line-height: 1;
+        }
+        .panel-edge-btn:hover { background: #e5e7eb; color: #10a37f; border-color: #10a37f; }
+        .panel-edge-right { right: 0; border-radius: 4px 0 0 4px; border-right: none; }
+
+        /* ── Artifact / Activity Panel ── */
+        .artifact-panel {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+            background: #fff;
+        }
+
+        .artifact-header {
+            padding: 12px 20px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .artifact-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a1a1a;
+        }
+
+        .artifact-tabs {
+            display: flex;
+            gap: 0;
+        }
+
+        .artifact-tab {
+            padding: 5px 12px;
+            font-size: 11px;
+            color: #888;
+            cursor: pointer;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            transition: all 0.15s;
+        }
+        .artifact-tab:first-child { border-radius: 6px 0 0 6px; }
+        .artifact-tab:last-child { border-radius: 0 6px 6px 0; }
+        .artifact-tab:not(:first-child) { border-left: none; }
+        .artifact-tab:hover { color: #555; background: #f3f4f6; }
+        .artifact-tab.active { background: #ecfdf5; color: #10a37f; border-color: #10a37f; }
+
+        .artifact-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            min-height: 0;
+        }
+
+        .section-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 8px 8px 4px;
+        }
+
+        #oc-sessions {
+            padding: 4px;
+            min-height: 0;
+        }
+
+        .oc-session-item {
+            padding: 10px 12px;
+            margin-bottom: 4px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+            background: #f9fafb;
+            border-left: 2px solid transparent;
+        }
+        .oc-session-item:hover { background: #f3f4f6; }
+        .oc-session-item.active { background: #ecfdf5; border-left-color: #10a37f; }
+
+        #oc-activity {
+            padding: 4px;
+            min-height: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="app" data-grid-base="1fr 1fr" data-layout="two-panel">
+
+        <!-- Chat Panel -->
+        <div class="chat-panel">
+            <div class="chat-header">
+                <div class="chat-header-left">
+                    <span class="chat-logo">&#129438;</span>
+                    <span class="chat-title">Main Session</span>
+                    <div id="oc-model-subtitle"></div>
+                    <div class="vsw">
+                        <a href="./index-original.html">Classic</a>
+                        <a href="./dark.html">Dark</a>
+                        <a href="./light.html" class="current">Light</a>
+                        <a href="./retro.html">Retro</a>
+                    </div>
+                </div>
+                <div class="chat-header-right">
+                    <button id="oc-new-chat" class="header-btn">&#10024; New</button>
+                    <button id="oc-export" class="header-btn">&#128228; Export</button>
+                    <button id="oc-settings" class="header-btn">&#9881;&#65039; Settings</button>
+                </div>
+            </div>
+
+            <div class="context-bar">
+                <div class="stat-group">
+                    <span class="stat-label">Model</span>
+                    <span class="stat-value" id="oc-stat-model">--</span>
+                </div>
+                <div class="stat-group">
+                    <span class="stat-label">Context</span>
+                    <span class="stat-value" id="oc-stat-context">--/--</span>
+                </div>
+                <div class="stat-group">
+                    <span class="stat-label">Cost</span>
+                    <span class="stat-value" id="oc-stat-cost">$0.0000</span>
+                </div>
+                <button id="oc-search" class="header-btn" style="margin-left:auto;padding:4px 8px;font-size:11px;">&#128269; Search</button>
+            </div>
+
+            <div id="oc-messages"></div>
+
+            <div class="input-area">
+                <textarea id="oc-input" placeholder="Type a message..." rows="1"></textarea>
+                <button id="oc-send">&#9654;</button>
+            </div>
+        </div>
+
+        <!-- Artifact / Activity Panel -->
+        <div class="artifact-panel oc-activity-panel">
+            <div class="artifact-header">
+                <div class="artifact-title">Live Context &amp; Tools</div>
+                <div class="artifact-tabs">
+                    <button class="artifact-tab active">All</button>
+                    <button class="artifact-tab">Tools</button>
+                    <button class="artifact-tab">Agents</button>
+                </div>
+            </div>
+            <div class="artifact-content">
+                <div class="section-label">Sessions</div>
+                <div id="oc-sessions"></div>
+                <div class="section-label" style="margin-top:12px;">Activity</div>
+                <div id="oc-activity"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="./render.js"></script>
+    <script src="./panels.js"></script>
+    <script src="./light.js"></script>
+    <script src="./chat.js"></script>
+</body>
+</html>

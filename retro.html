@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw v9 - Pixel Art Retro</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body, * { overflow-x: hidden; }
+        pre, code, td, th, .message-text, .message-bubble, p, div { overflow-wrap: break-word; word-wrap: break-word; word-break: break-word; }
+
+        body {
+            font-family: 'Press Start 2P', monospace;
+            background: #2d1b3d;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+        }
+
+        /* CRT Effect */
+        .crt-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                repeating-linear-gradient(
+                    0deg,
+                    rgba(0, 0, 0, 0.15),
+                    rgba(0, 0, 0, 0.15) 1px,
+                    transparent 1px,
+                    transparent 2px
+                );
+            pointer-events: none;
+            z-index: 1000;
+            animation: flicker 0.15s infinite;
+        }
+
+        @keyframes flicker {
+            0% { opacity: 0.98; }
+            50% { opacity: 1; }
+            100% { opacity: 0.98; }
+        }
+
+        .app {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            background: 
+                linear-gradient(135deg, #2d1b3d 0%, #1a1a2e 50%, #16213e 100%);
+        }
+
+        /* Top Bar */
+        .top-bar {
+            background: #000;
+            border: 4px solid #fff;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 
+                0 0 0 2px #000,
+                0 0 0 4px #8b5cf6,
+                0 4px 0 4px #000;
+        }
+
+        .logo-pixel {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .pixel-char {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(45deg, 
+                #8b5cf6 0%, #8b5cf6 25%,
+                #a78bfa 25%, #a78bfa 50%,
+                #8b5cf6 50%, #8b5cf6 75%,
+                #6d28d9 75%);
+            border: 2px solid #fff;
+            position: relative;
+            animation: bounce 0.8s infinite;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-4px); }
+        }
+
+        .pixel-char::before {
+            content: '🦞';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+        }
+
+        .title-text {
+            font-size: 12px;
+            color: #fbbf24;
+            text-shadow: 2px 2px 0 #000;
+        }
+
+        .stats-bar {
+            display: flex;
+            gap: 16px;
+            font-size: 8px;
+        }
+
+        .stat {
+            color: #34d399;
+            text-shadow: 1px 1px 0 #000;
+        }
+
+        /* Version Switcher */
+        .vsw { display:flex; gap:4px; margin-left:16px; }
+        .vsw a { padding:4px 8px; font-family:'Press Start 2P',monospace; font-size:7px; color:#666; background:#000; border:2px solid #fff; text-decoration:none; transition:all 0.1s; }
+        .vsw a:hover { background:#1e3a8a; color:#fbbf24; border-color:#fbbf24; }
+        .vsw a.current { background:#8b5cf6; color:#fff; border-color:#fbbf24; box-shadow:0 0 0 2px #fbbf24; }
+
+        /* Main Container */
+        .main-container {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 16px;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            background: #1a1a2e;
+            border: 4px solid #fff;
+            box-shadow:
+                0 0 0 2px #000,
+                0 0 0 4px #3b82f6;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            background: #000;
+            padding: 12px;
+            border-bottom: 4px solid #fff;
+            font-size: 10px;
+            color: #fbbf24;
+            text-align: center;
+            text-shadow: 2px 2px 0 #3b82f6;
+        }
+
+        .sessions-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        .session-item {
+            background: #000;
+            border: 2px solid #3b82f6;
+            padding: 10px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.1s;
+            font-size: 8px;
+        }
+
+        .session-item:hover {
+            background: #1e3a8a;
+            border-color: #60a5fa;
+            transform: scale(1.02);
+        }
+
+        .session-item.active {
+            background: #1e3a8a;
+            border-color: #fbbf24;
+            box-shadow: 0 0 0 2px #fbbf24;
+        }
+
+        .new-session-btn {
+            margin: 12px;
+            padding: 12px;
+            background: #10b981;
+            border: 4px solid #fff;
+            color: #000;
+            font-family: 'Press Start 2P', monospace;
+            font-size: 10px;
+            cursor: pointer;
+            box-shadow: 0 4px 0 #059669;
+            transition: all 0.1s;
+        }
+
+        .new-session-btn:active {
+            transform: translateY(4px);
+            box-shadow: none;
+        }
+
+        /* Chat Area */
+        .chat-area {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .chat-window {
+            flex: 1;
+            background: #1a1a2e;
+            border: 4px solid #fff;
+            box-shadow:
+                0 0 0 2px #000,
+                0 0 0 4px #8b5cf6;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: #000;
+            padding: 12px;
+            border-bottom: 4px solid #fff;
+            font-size: 10px;
+            color: #34d399;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .context-display {
+            font-size: 7px;
+            color: #fbbf24;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            min-height: 0;
+        }
+
+        /* Pixel Message Bubbles */
+        .message {
+            margin-bottom: 16px;
+            animation: slideIn 0.3s;
+        }
+
+        .message .message-avatar { display: none; }
+        .message.user .message-author { text-align: right; }
+        .message.user .message-bubble { background: rgba(139,92,246,0.15); border: 2px solid #8b5cf6; }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .message-avatar {
+            width: 64px;
+            height: 64px;
+            flex-shrink: 0;
+            position: relative;
+        }
+
+        .pixel-sprite {
+            width: 64px;
+            height: 64px;
+            background: #8b5cf6;
+            border: 2px solid #fff;
+            position: relative;
+            animation: idle 2s infinite;
+        }
+
+        @keyframes idle {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-2px); }
+        }
+
+        .pixel-sprite.user {
+            background: #ef4444;
+        }
+
+        /* Pixel face */
+        .pixel-sprite::before {
+            content: '';
+            position: absolute;
+            width: 12px;
+            height: 4px;
+            background: #fff;
+            top: 24px;
+            left: 12px;
+        }
+
+        .pixel-sprite::after {
+            content: '';
+            position: absolute;
+            width: 12px;
+            height: 4px;
+            background: #fff;
+            top: 24px;
+            right: 12px;
+        }
+
+        .message-bubble {
+            flex: 1;
+            background: #000;
+            border: 4px solid #fff;
+            padding: 12px;
+            position: relative;
+            font-size: 10px;
+            line-height: 1.8;
+            box-shadow: 0 4px 0 rgba(0, 0, 0, 0.5);
+        }
+
+        .message-bubble::before {
+            content: '';
+            position: absolute;
+            left: -12px;
+            top: 16px;
+            width: 0;
+            height: 0;
+            border-top: 8px solid transparent;
+            border-bottom: 8px solid transparent;
+            border-right: 8px solid #fff;
+        }
+
+        .message.user .message-bubble::before {
+            display: none;
+        }
+
+        .message-author {
+            color: #fbbf24;
+            margin-bottom: 8px;
+            font-size: 8px;
+        }
+
+        .message-text {
+            color: #fff;
+        }
+
+        /* Activity Box */
+        .activity-box {
+            background: #000;
+            border: 2px solid #10b981;
+            padding: 10px;
+            margin: 12px 0;
+            font-size: 8px;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { border-color: #10b981; }
+            50% { border-color: #34d399; }
+        }
+
+        .activity-label {
+            color: #10b981;
+            margin-bottom: 6px;
+        }
+
+        .activity-text {
+            color: #fff;
+            font-size: 7px;
+            line-height: 1.6;
+        }
+
+        .agent-box {
+            background: #000;
+            border: 2px solid #8b5cf6;
+            padding: 10px;
+            margin: 12px 0;
+            font-size: 8px;
+        }
+
+        .agent-header {
+            color: #a78bfa;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .agent-stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-top: 8px;
+            font-size: 7px;
+        }
+
+        .agent-stat {
+            color: #34d399;
+        }
+
+        /* Input Area */
+        .input-area {
+            background: #000;
+            border: 4px solid #fff;
+            padding: 12px;
+            display: flex;
+            gap: 12px;
+            box-shadow: 
+                0 0 0 2px #000,
+                0 0 0 4px #fbbf24;
+        }
+
+        .input-field {
+            flex: 1;
+            background: #1a1a2e;
+            border: 2px solid #fff;
+            color: #fff;
+            padding: 12px;
+            font-family: 'Press Start 2P', monospace;
+            font-size: 10px;
+            resize: none;
+            min-height: 60px;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #fbbf24;
+            box-shadow: 0 0 0 2px #fbbf24;
+        }
+
+        .send-btn {
+            width: 80px;
+            background: #fbbf24;
+            border: 4px solid #fff;
+            color: #000;
+            font-family: 'Press Start 2P', monospace;
+            font-size: 10px;
+            cursor: pointer;
+            box-shadow: 0 4px 0 #d97706;
+            transition: all 0.1s;
+        }
+
+        .send-btn:active {
+            transform: translateY(4px);
+            box-shadow: none;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width:6px; height:6px; }
+        ::-webkit-scrollbar-track { background:#0a0a14; }
+        ::-webkit-scrollbar-thumb { background:#8b5cf6; border-radius:0; }
+        ::-webkit-scrollbar-thumb:hover { background:#fbbf24; }
+        * { scrollbar-width:thin; scrollbar-color:#8b5cf6 #0a0a14; }
+
+        /* Blinking cursor */
+        .typing-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 12px;
+            background: #fff;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
+
+        /* Particle effects */
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        .particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: #fbbf24;
+            animation: float 3s infinite;
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(100vh) translateX(0);
+                opacity: 0;
+            }
+            10% {
+                opacity: 1;
+            }
+            90% {
+                opacity: 1;
+            }
+            100% {
+                transform: translateY(-100px) translateX(100px);
+                opacity: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="crt-overlay"></div>
+    <div class="particles" id="particles"></div>
+
+    <div class="app">
+        <div class="top-bar">
+            <div class="logo-pixel">
+                <div class="pixel-char"></div>
+                <div class="title-text">OPENCLAW v1.0</div>
+            </div>
+            <div class="stats-bar">
+                <div class="stat" id="oc-model-subtitle" style="cursor:pointer;color:#8b5cf6;" title="Click to change model">—</div>
+                <div class="stat" id="oc-stat-hp">HP: —/—</div>
+                <div class="stat" id="oc-stat-mp">MP: —/—</div>
+                <div class="stat" id="oc-stat-gold">GOLD: —</div>
+                <div class="stat" id="oc-stat-lvl">LVL: —</div>
+                <div class="vsw">
+                    <a href="./index-original.html">Classic</a>
+                    <a href="./dark.html">Dark</a>
+                    <a href="./light.html">Light</a>
+                    <a href="./retro.html" class="current">Retro</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-container app" data-grid-base="300px 1fr" data-sidebar-width="300px">
+            <div class="sidebar oc-sidebar-panel">
+                <div class="sidebar-header">
+                    === SESSIONS ===
+                </div>
+                <button class="new-session-btn" id="oc-new-chat">+ NEW QUEST</button>
+                <div class="sessions-list" id="oc-sessions"></div>
+                <div style="padding:8px;margin-top:8px;border-top:2px solid #333;font-size:6px;font-family:'Press Start 2P',monospace;color:#666;">=== ACTIVITY ===</div>
+                <div id="oc-activity" style="padding:0 8px;font-size:9px;"></div>
+            </div>
+
+            <div class="chat-area">
+                <div class="chat-window">
+                    <div class="chat-header">
+                        <span>>> MAIN QUEST TERMINAL</span>
+                        <span style="display:flex;gap:6px;align-items:center;">
+                            <button id="oc-search" style="background:#000;border:2px solid #10b981;color:#10b981;font-family:'Press Start 2P',monospace;font-size:6px;padding:3px 6px;cursor:pointer;">SEARCH</button>
+                            <button id="oc-export" style="background:#000;border:2px solid #3b82f6;color:#3b82f6;font-family:'Press Start 2P',monospace;font-size:6px;padding:3px 6px;cursor:pointer;">EXPORT</button>
+                            <button id="oc-settings" style="background:#000;border:2px solid #fbbf24;color:#fbbf24;font-family:'Press Start 2P',monospace;font-size:6px;padding:3px 6px;cursor:pointer;">CONFIG</button>
+                            <span class="context-display" id="oc-stat-ctx">CTX: —/— (—)</span>
+                        </span>
+                    </div>
+
+                    <div class="messages" id="oc-messages"></div>
+                </div>
+
+                <div class="input-area">
+                    <textarea class="input-field" id="oc-input" placeholder="> ENTER COMMAND_"></textarea>
+                    <button class="send-btn" id="oc-send">SEND</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="./render.js"></script>
+    <script src="./panels.js"></script>
+    <script src="./retro.js"></script>
+    <script src="./chat.js"></script>
+</body>
+</html>
