@@ -1545,9 +1545,17 @@
                 if (!sending) enterPendingReloadState();
               } else {
                 serverSessionRunning = false;
-                // Agent stopped — clear pending state if we were waiting
+                // Agent stopped — clear pending state and load final response
                 if (sending && wsChatRunId === 'pending-reload') {
+                  sending = false;
+                  restoreSendButton();
+                  stopStreamCounter();
+                  clearSendTimeout();
+                  wsChatRunId = '';
+                  pendingSessionId = '';
+                  // Fetch the response
                   wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+                  processQueue();
                 }
               }
               var sess = msg.payload.sessions;
@@ -1782,29 +1790,13 @@
       renderSidebar();
     }
 
-    // Detect agent busy state from server
-    var serverLastRole = serverParsed.length > 0 ? serverParsed[serverParsed.length - 1].role : 'none';
+    // If in pending state, keep polling sessions.list to detect when agent finishes
     if (sending && wsChatRunId === 'pending-reload') {
-      if (serverLastRole === 'assistant' && !serverSessionRunning) {
-        // Agent responded AND session is idle — clear pending
-        sending = false;
-        restoreSendButton();
-        stopStreamCounter();
-        clearSendTimeout();
-        wsChatRunId = '';
-        pendingSessionId = '';
-        processQueue();
-      } else {
-        // Agent still working — refresh sessions.list + chat.history periodically
-        setTimeout(function() {
-          if (sending && wsChatRunId === 'pending-reload') {
-            wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
-            wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
-          }
-        }, 5000);
-      }
-    } else if (serverLastRole === 'user' && !sending) {
-      enterPendingReloadState();
+      setTimeout(function() {
+        if (sending && wsChatRunId === 'pending-reload') {
+          wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+        }
+      }, 5000);
     }
   }
 
