@@ -141,9 +141,11 @@
     return lines.slice(startIdx).join('\n').trim();
   }
 
-  function renderMessage(container, role, content) {
+  function renderMessage(container, role, content, timestamp) {
     // Skip empty messages
     if (!content || !content.trim()) return;
+    // Set timestamp for theme renderers to use
+    window.ocMsgTimestamp = timestamp || Date.now();
     if (role === 'user') {
       if (window.ocRenderUserMsg) {
         window.ocRenderUserMsg(container, content);
@@ -176,7 +178,7 @@
     var s = getSession();
     if (!s) return;
     for (var j = 0; j < s.messages.length; j++) {
-      renderMessage(container, s.messages[j].role, s.messages[j].content);
+      renderMessage(container, s.messages[j].role, s.messages[j].content, s.messages[j].time);
     }
     container.scrollTop = container.scrollHeight;
   }
@@ -641,8 +643,8 @@
   function saveBeforeUnload() {
     if (sending && pendingFullText && pendingSessionId && sessions[pendingSessionId]) {
       var s = sessions[pendingSessionId];
-      s.history.push({ role: 'assistant', content: pendingFullText });
-      s.messages.push({ role: 'assistant', content: pendingFullText });
+      s.history.push({ role: 'assistant', content: pendingFullText, time: Date.now() });
+      s.messages.push({ role: 'assistant', content: pendingFullText, time: Date.now() });
       if (!s.activity) s.activity = [];
       s.activity.push({ type: 'receive', text: '(saved mid-stream) ' + (pendingFullText.length > 40 ? pendingFullText.slice(0, 40) + '...' : pendingFullText), time: new Date().toISOString() });
       saveAll();
@@ -827,8 +829,8 @@
             wsChatBotEl = div;
           }
         }
-        s.history.push({ role: 'assistant', content: content });
-        s.messages.push({ role: 'assistant', content: content });
+        s.history.push({ role: 'assistant', content: content, time: Date.now() });
+        s.messages.push({ role: 'assistant', content: content, time: Date.now() });
         addActivity('receive', content.length > 60 ? content.slice(0, 60) + '...' : content);
         if (wsChatBotEl && window.ocRenderMarkdown) {
           wsChatBotEl.innerHTML = window.ocRenderMarkdown(content);
@@ -921,8 +923,8 @@
     startStreamCounter();
     addActivity('send', text.length > 60 ? text.slice(0, 60) + '...' : text);
     renderMessage(container, 'user', text);
-    s.messages.push({ role: 'user', content: text });
-    s.history.push({ role: 'user', content: text });
+    s.messages.push({ role: 'user', content: text, time: Date.now() });
+    s.history.push({ role: 'user', content: text, time: Date.now() });
     // Update session name from first message
     if (s.messages.length === 1) {
       s.name = text.length > 30 ? text.slice(0, 30) + '...' : text;
@@ -991,8 +993,8 @@
           if (result.done) {
             cancelStreamRender();
             if (!gotFirstChunk) hideLoading(); // stream ended with no content
-            s.history.push({ role: 'assistant', content: fullText });
-            s.messages.push({ role: 'assistant', content: fullText });
+            s.history.push({ role: 'assistant', content: fullText, time: Date.now() });
+            s.messages.push({ role: 'assistant', content: fullText, time: Date.now() });
             addActivity('receive', fullText.length > 60 ? fullText.slice(0, 60) + '...' : fullText);
             // Re-render final message with markdown
             if (botEl && window.ocRenderMarkdown) {
@@ -1110,10 +1112,11 @@
     // Add to local history
     var s = getSession();
     if (s) {
-      s.messages.push({ role: 'user', content: text });
-      s.history.push({ role: 'user', content: text });
+      var now = Date.now();
+      s.messages.push({ role: 'user', content: text, time: now });
+      s.history.push({ role: 'user', content: text, time: now });
       var container = document.getElementById('oc-messages');
-      if (container) { renderMessage(container, 'user', text); scrollBottom(container); }
+      if (container) { renderMessage(container, 'user', text, now); scrollBottom(container); }
       saveAll();
       renderSidebar();
     }
@@ -1766,7 +1769,10 @@
         (Array.isArray(m.content) ? m.content.map(function(c) { return c.text || ''; }).join('') : '');
       // Strip server metadata from user messages
       if (m.role === 'user' && content) content = stripServerMetadata(content);
-      return { role: m.role, content: content };
+      // Extract timestamp from server message
+      var time = m.timestamp || m.ts || m.time || m.createdAt || null;
+      if (typeof time === 'string') time = new Date(time).getTime();
+      return { role: m.role, content: content, time: time || null };
     }).filter(function(m) { return (m.role === 'user' || m.role === 'assistant') && m.content && m.content.trim(); });
 
     // Server is the source of truth — replace local if different

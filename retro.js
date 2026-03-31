@@ -24,7 +24,8 @@ document.querySelectorAll('.vsw a').forEach(function(el) {
 
 // Custom renderers for v9 retro style
 function ocTime() {
-    return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    var ts = window.ocMsgTimestamp || Date.now();
+    return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 
 window.ocRenderUserMsg = function(container, text) {
