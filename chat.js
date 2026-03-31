@@ -1546,6 +1546,14 @@
               if (mainSess && mainSess.status === 'running') {
                 serverSessionRunning = true;
                 if (!sending) enterPendingReloadState();
+                // Keep polling while agent is running
+                else if (wsChatRunId === 'pending-reload') {
+                  setTimeout(function() {
+                    if (sending && wsChatRunId === 'pending-reload') {
+                      wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+                    }
+                  }, 5000);
+                }
               } else {
                 serverSessionRunning = false;
                 // Agent stopped — clear pending state and load final response
