@@ -1543,31 +1543,31 @@
               for (var si = 0; si < msg.payload.sessions.length; si++) {
                 if (msg.payload.sessions[si].key === wsSessionKey) { mainSess = msg.payload.sessions[si]; break; }
               }
-              if (mainSess && mainSess.status === 'running') {
-                serverSessionRunning = true;
-                if (!sending) enterPendingReloadState();
-                // Keep polling while agent is running
-                else if (wsChatRunId === 'pending-reload') {
-                  setTimeout(function() {
-                    if (sending && wsChatRunId === 'pending-reload') {
-                      wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
-                    }
-                  }, 5000);
-                }
-              } else {
-                serverSessionRunning = false;
-                // Agent stopped — clear pending state and load final response
-                if (sending && wsChatRunId === 'pending-reload') {
+              var agentRunning = mainSess && mainSess.status === 'running';
+              serverSessionRunning = agentRunning;
+
+              if (sending && wsChatRunId === 'pending-reload') {
+                if (!agentRunning) {
+                  // Agent finished — clear thinking bar and load response
                   sending = false;
                   restoreSendButton();
                   stopStreamCounter();
                   clearSendTimeout();
                   wsChatRunId = '';
                   pendingSessionId = '';
-                  // Fetch the response
                   wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
                   processQueue();
+                } else {
+                  // Still running — poll again
+                  setTimeout(function() {
+                    if (sending && wsChatRunId === 'pending-reload') {
+                      wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+                    }
+                  }, 5000);
                 }
+              } else if (!sending && agentRunning && wasBusy()) {
+                // Page reload while agent is still processing OUR message
+                enterPendingReloadState();
               }
               var sess = msg.payload.sessions;
               var defaults = msg.payload.defaults || {};
