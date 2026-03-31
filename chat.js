@@ -15,6 +15,18 @@
   var activeId = '';
   var sending = false;
   var token = '';
+  var messageQueue = [];   // Queue for messages sent while agent is thinking
+  var sendTimeoutId = null; // Watchdog timer for stuck thinking
+  var SEND_TIMEOUT_MS = 180000; // 3 minutes max thinking time
+  var QUEUE_KEY = 'oc_msg_queue';
+  var BUSY_KEY = 'oc_agent_busy'; // Persists sending state across reloads
+  var serverSessionRunning = false; // True if sessions.list reported status=running
+
+  function saveQueue() { try { localStorage.setItem(QUEUE_KEY, JSON.stringify(messageQueue)); } catch(e) {} }
+  function loadQueue() { try { var r = localStorage.getItem(QUEUE_KEY); if (r) messageQueue = JSON.parse(r); } catch(e) {} }
+  function markBusy() { try { localStorage.setItem(BUSY_KEY, Date.now().toString()); } catch(e) {} }
+  function clearBusy() { try { localStorage.removeItem(BUSY_KEY); } catch(e) {} }
+  function wasBusy() { try { var t = localStorage.getItem(BUSY_KEY); return t ? parseInt(t, 10) : 0; } catch(e) { return 0; } }
 
   // ── Persistence ──
   function saveAll() {
@@ -95,7 +107,43 @@
     var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
   }
 
+  // Strip OpenClaw server metadata from user messages loaded via chat.history
+  // Server prepends: System: [...] lines, Sender (untrusted metadata) blocks, [timestamp] prefix
+  function stripServerMetadata(text) {
+    if (!text) return text;
+    var lines = text.split('\n');
+    var startIdx = 0;
+    var inSenderBlock = false;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      // Skip System: [...] lines
+      if (/^System:\s*\[/.test(line)) { startIdx = i + 1; continue; }
+      // Skip Sender (untrusted metadata) block
+      if (/^Sender\s*\(untrusted\s+metadata\)/.test(line)) { inSenderBlock = true; startIdx = i + 1; continue; }
+      if (inSenderBlock) {
+        startIdx = i + 1;
+        if (line.trim() === '```' || line.trim() === '') { inSenderBlock = false; }
+        continue;
+      }
+      // Skip [Day YYYY-MM-DD HH:MM TZ] timestamp prefix on the actual message line
+      var tsMatch = line.match(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+\w+\]\s*(.*)/);
+      if (tsMatch) {
+        lines[i] = tsMatch[1]; // Keep only the text after timestamp
+        startIdx = i;
+        break;
+      }
+      // If line doesn't match any metadata pattern, it's the start of actual content
+      if (line.trim() && !/^System:|^Sender|^\[/.test(line)) {
+        startIdx = i;
+        break;
+      }
+    }
+    return lines.slice(startIdx).join('\n').trim();
+  }
+
   function renderMessage(container, role, content) {
+    // Skip empty messages
+    if (!content || !content.trim()) return;
     if (role === 'user') {
       if (window.ocRenderUserMsg) {
         window.ocRenderUserMsg(container, content);
@@ -214,17 +262,215 @@
       el.innerHTML = '<div style="padding:20px;text-align:center;color:#666;font-size:11px;">No activity yet</div>';
       return;
     }
-    var icons = { send: '\uD83D\uDCE4', receive: '\uD83E\uDD9E', error: '\u26A0\uFE0F', system: '\u2699\uFE0F' };
+    var icons = { send: '\uD83D\uDCE4', receive: '\uD83E\uDD9E', error: '\u26A0\uFE0F', system: '\u2699\uFE0F', queued: '\uD83D\uDCCB' };
     el.innerHTML = items.slice().reverse().map(function(a) {
       var time = a.time ? new Date(a.time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
       var icon = icons[a.type] || '\uD83D\uDD35';
-      var colors = { send: '#667eea', receive: '#22c55e', error: '#ef4444', system: '#fbbf24' };
+      var colors = { send: '#667eea', receive: '#22c55e', error: '#ef4444', system: '#fbbf24', queued: '#a78bfa' };
       var color = colors[a.type] || '#888';
-      return '<div style="padding:8px 12px;margin-bottom:4px;background:#1a1a1a;border-radius:6px;border-left:3px solid ' + color + ';font-size:11px;">' +
-        '<div style="font-size:9px;color:#666;margin-bottom:2px;">' + time + '</div>' +
+      return '<div style="padding:6px 10px;margin-bottom:3px;background:#1a1a1a;border-radius:6px;border-left:3px solid ' + color + ';font-size:11px;">' +
+        '<div style="font-size:9px;color:#666;margin-bottom:1px;">' + time + '</div>' +
         '<div style="color:#aaa;">' + icon + ' ' + escHtml(a.text) + '</div>' +
       '</div>';
     }).join('');
+  }
+
+  // ── Agent Stream Logs (bottom half of activity panel) ──
+  // Tracks spawned agents with per-agent tabs and streaming logs
+  var agentRuns = {};       // { runId: { label, status, logs: [], startedAt } }
+  var activeAgentTab = '';  // Currently selected agent tab runId
+  var agentLogsDismissed = false; // User closed the agent logs section
+  var AGENT_LOGS_KEY = 'oc_agent_logs';
+
+  function saveAgentLogs() {
+    try {
+      localStorage.setItem(AGENT_LOGS_KEY, JSON.stringify({ runs: agentRuns, active: activeAgentTab, dismissed: agentLogsDismissed }));
+    } catch(e) {}
+  }
+
+  function loadAgentLogs() {
+    try {
+      var raw = localStorage.getItem(AGENT_LOGS_KEY);
+      if (raw) {
+        var data = JSON.parse(raw);
+        agentRuns = data.runs || {};
+        activeAgentTab = data.active || '';
+        agentLogsDismissed = data.dismissed || false;
+        // Validate activeAgentTab still exists
+        if (activeAgentTab && !agentRuns[activeAgentTab]) {
+          var ids = Object.keys(agentRuns);
+          activeAgentTab = ids.length > 0 ? ids[ids.length - 1] : '';
+        }
+      }
+    } catch(e) {}
+  }
+
+  function addAgentLog(runId, type, text) {
+    if (!agentRuns[runId]) return;
+    agentRuns[runId].logs.push({ type: type, text: text, time: Date.now() });
+    if (agentRuns[runId].logs.length > 200) agentRuns[runId].logs = agentRuns[runId].logs.slice(-200);
+    saveAgentLogs();
+    if (activeAgentTab === runId) renderAgentLogEntries();
+  }
+
+  function onAgentStart(runId, label) {
+    agentRuns[runId] = { label: label || 'Agent', status: 'running', logs: [], startedAt: Date.now() };
+    if (!activeAgentTab) activeAgentTab = runId;
+    agentLogsDismissed = false;
+    saveAgentLogs();
+    renderAgentLogs();
+  }
+
+  function onAgentEnd(runId, reason) {
+    if (!agentRuns[runId]) return;
+    agentRuns[runId].status = reason === 'error' ? 'error' : 'stopped';
+    addAgentLog(runId, 'lifecycle', reason === 'error' ? 'Agent error' : 'Agent finished' + (reason ? ' (' + reason + ')' : ''));
+    saveAgentLogs();
+    renderAgentTabs();
+  }
+
+  function closeAgentTab(runId) {
+    delete agentRuns[runId];
+    var ids = Object.keys(agentRuns);
+    if (activeAgentTab === runId) activeAgentTab = ids.length > 0 ? ids[ids.length - 1] : '';
+    if (ids.length === 0) agentLogsDismissed = true;
+    saveAgentLogs();
+    renderAgentLogs();
+  }
+
+  function closeAllAgentLogs() {
+    agentLogsDismissed = true;
+    saveAgentLogs();
+    renderAgentLogs();
+  }
+
+  function selectAgentTab(runId) {
+    activeAgentTab = runId;
+    saveAgentLogs();
+    renderAgentTabs();
+    renderAgentLogEntries();
+  }
+
+  function fmtLogTime(ts) {
+    var d = new Date(ts);
+    return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  }
+
+  function renderAgentLogs() {
+    var container = document.getElementById('oc-agent-logs');
+    if (!container) return;
+    var ids = Object.keys(agentRuns);
+    if (ids.length === 0 || agentLogsDismissed) {
+      container.style.display = 'none';
+      container.innerHTML = '';
+      return;
+    }
+    container.style.display = 'flex';
+    container.innerHTML =
+      '<div class="oc-alog-header">' +
+        '<span class="oc-alog-title">Agent Logs</span>' +
+        '<button class="oc-alog-close" title="Close logs">\u00D7</button>' +
+      '</div>' +
+      '<div class="oc-alog-tabs" id="oc-alog-tabs"></div>' +
+      '<div class="oc-alog-entries" id="oc-alog-entries"></div>';
+
+    container.querySelector('.oc-alog-close').addEventListener('click', closeAllAgentLogs);
+    renderAgentTabs();
+    renderAgentLogEntries();
+  }
+
+  function renderAgentTabs() {
+    var tabsEl = document.getElementById('oc-alog-tabs');
+    if (!tabsEl) return;
+    var ids = Object.keys(agentRuns);
+    tabsEl.innerHTML = ids.map(function(id) {
+      var r = agentRuns[id];
+      var active = id === activeAgentTab;
+      var statusDot = r.status === 'running' ? '\uD83D\uDFE2' : (r.status === 'error' ? '\uD83D\uDD34' : '\u26AA');
+      return '<div class="oc-alog-tab' + (active ? ' active' : '') + '" data-agent-id="' + id + '">' +
+        '<span class="oc-alog-tab-dot">' + statusDot + '</span>' +
+        '<span class="oc-alog-tab-label">' + escHtml(r.label) + '</span>' +
+        '<button class="oc-alog-tab-close" data-close-agent="' + id + '" title="Close">\u00D7</button>' +
+      '</div>';
+    }).join('');
+
+    tabsEl.querySelectorAll('.oc-alog-tab').forEach(function(tabEl) {
+      tabEl.addEventListener('click', function(e) {
+        if (e.target.classList.contains('oc-alog-tab-close')) return;
+        selectAgentTab(tabEl.getAttribute('data-agent-id'));
+      });
+    });
+    tabsEl.querySelectorAll('.oc-alog-tab-close').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        closeAgentTab(btn.getAttribute('data-close-agent'));
+      });
+    });
+  }
+
+  function renderAgentLogEntries() {
+    var el = document.getElementById('oc-alog-entries');
+    if (!el || !activeAgentTab || !agentRuns[activeAgentTab]) return;
+    var logs = agentRuns[activeAgentTab].logs;
+    if (logs.length === 0) {
+      el.innerHTML = '<div style="padding:12px;text-align:center;color:#555;font-size:10px;">Waiting for agent output...</div>';
+      return;
+    }
+    var logColors = { tool: '#fbbf24', assistant: '#22c55e', output: '#22c55e', lifecycle: '#667eea', error: '#ef4444' };
+    var logIcons = { tool: '\uD83D\uDD27', assistant: '\uD83D\uDCAC', output: '\uD83D\uDCAC', lifecycle: '\u2699\uFE0F', error: '\u26A0\uFE0F' };
+    el.innerHTML = logs.map(function(l) {
+      var color = logColors[l.type] || '#888';
+      var icon = logIcons[l.type] || '\uD83D\uDD35';
+      // Output entries get a special multi-line style
+      if (l.type === 'output') {
+        return '<div class="oc-alog-entry" style="border-left-color:' + color + ';white-space:pre-wrap;line-height:1.4;padding:4px 6px;">' +
+          '<span class="oc-alog-time">' + fmtLogTime(l.time) + '</span> ' +
+          '<span style="color:' + color + ';">' + icon + '</span> ' +
+          '<span class="oc-alog-text">' + escHtml(l.text) + '</span></div>';
+      }
+      return '<div class="oc-alog-entry" style="border-left-color:' + color + ';">' +
+        '<span class="oc-alog-time">' + fmtLogTime(l.time) + '</span> ' +
+        '<span style="color:' + color + ';">' + icon + '</span> ' +
+        '<span class="oc-alog-text">' + escHtml(l.text) + '</span>' +
+      '</div>';
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function injectAgentLogStyles() {
+    if (document.getElementById('oc-alog-styles')) return;
+    var style = document.createElement('style');
+    style.id = 'oc-alog-styles';
+    style.textContent =
+      '#oc-agent-logs{display:none;flex-direction:column;border-top:1px solid #2a2a3a;min-height:120px;flex:1;overflow:hidden;}' +
+      '.oc-alog-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#111;border-bottom:1px solid #2a2a3a;flex-shrink:0;}' +
+      '.oc-alog-title{font-size:11px;font-weight:600;color:#ccc;text-transform:uppercase;letter-spacing:0.5px;}' +
+      '.oc-alog-close{background:none;border:none;color:#666;font-size:16px;cursor:pointer;padding:0 4px;line-height:1;}' +
+      '.oc-alog-close:hover{color:#ef4444;}' +
+      '.oc-alog-tabs{display:flex;gap:0;overflow-x:auto;flex-shrink:0;background:#0d0d0d;border-bottom:1px solid #1e1e2e;}' +
+      '.oc-alog-tab{display:flex;align-items:center;gap:4px;padding:5px 10px;font-size:10px;color:#888;cursor:pointer;border-right:1px solid #1e1e2e;white-space:nowrap;flex-shrink:0;}' +
+      '.oc-alog-tab.active{background:#1a1a2e;color:#e0e0e0;}' +
+      '.oc-alog-tab:hover{background:#1a1a2e;}' +
+      '.oc-alog-tab-dot{font-size:8px;}' +
+      '.oc-alog-tab-label{max-width:80px;overflow:hidden;text-overflow:ellipsis;}' +
+      '.oc-alog-tab-close{background:none;border:none;color:#555;font-size:12px;cursor:pointer;padding:0 2px;line-height:1;flex-shrink:0;}' +
+      '.oc-alog-tab-close:hover{color:#ef4444;}' +
+      '.oc-alog-entries{flex:1;overflow-y:auto;padding:4px 6px;min-height:0;font-family:monospace;}' +
+      '.oc-alog-entry{padding:2px 6px;margin-bottom:1px;font-size:10px;color:#aaa;border-left:2px solid #333;line-height:1.5;}' +
+      '.oc-alog-time{color:#555;font-size:9px;}' +
+      '.oc-alog-text{word-break:break-word;}' +
+      /* Light theme overrides */
+      '@media (prefers-color-scheme:light){' +
+        '#oc-agent-logs{border-top-color:#e5e7eb;}' +
+        '.oc-alog-header{background:#f8f9fa;border-bottom-color:#e5e7eb;}' +
+        '.oc-alog-title{color:#333;}' +
+        '.oc-alog-tabs{background:#fff;border-bottom-color:#e5e7eb;}' +
+        '.oc-alog-tab{color:#666;border-right-color:#e5e7eb;}' +
+        '.oc-alog-tab.active{background:#eef2ff;color:#333;}' +
+        '.oc-alog-entry{color:#555;border-left-color:#ddd;}' +
+        '.oc-alog-time{color:#999;}' +
+      '}';
+    document.head.appendChild(style);
   }
 
   // ── Input & streaming counters ──
@@ -278,19 +524,95 @@
     updateStreamCounter(-1);
   }
 
+  // ── Throttled streaming markdown render ──
+  var streamRenderTimer = null;
+  var streamRenderEl = null;
+  var streamRenderText = '';
+  var streamRenderActive = false; // true once first markdown render has been applied
+  var STREAM_RENDER_INTERVAL = 300; // ms between markdown re-renders during streaming
+
+  function scheduleStreamRender(el, text) {
+    if (!window.ocRenderMarkdown) return;
+    streamRenderEl = el;
+    streamRenderText = text;
+    if (streamRenderTimer) return; // Already scheduled
+    streamRenderTimer = setTimeout(function() {
+      streamRenderTimer = null;
+      if (streamRenderEl && streamRenderText) {
+        var rendered = window.ocRenderMarkdown(streamRenderText);
+        if (rendered) {
+          streamRenderEl.innerHTML = rendered;
+          streamRenderActive = true;
+          var container = document.getElementById('oc-messages');
+          if (container) container.scrollTop = container.scrollHeight;
+        }
+        // If render produced nothing, keep showing textContent (don't wipe)
+      }
+    }, STREAM_RENDER_INTERVAL);
+  }
+
+  function applyStreamText(el, text) {
+    // Always show text immediately, then schedule formatted render
+    if (!streamRenderActive) {
+      el.textContent = text;
+    }
+    // Schedule throttled markdown render (updates streamRenderText for pending timer)
+    scheduleStreamRender(el, text);
+  }
+
+  // Fixed thinking bar above input — doesn't scroll with messages
+  // Detect if page uses light theme
+  function isLightTheme() { return document.body && getComputedStyle(document.body).backgroundColor.indexOf('255') !== -1; }
+
+  function showThinkingBar() {
+    if (document.getElementById('oc-thinking-bar')) return;
+    var inputArea = document.querySelector('.input-area') || document.querySelector('.chat-input-area');
+    if (!inputArea) return;
+    var light = isLightTheme();
+    var bar = document.createElement('div');
+    bar.id = 'oc-thinking-bar';
+    bar.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:12px;' +
+      (light ? 'background:#f0f4ff;border-top:1px solid #e5e7eb;color:#4f46e5;' : 'background:#12121a;border-top:1px solid #2a2a3a;color:#8b9cf7;');
+    bar.innerHTML = loadingDots + ' <span>Agent is thinking...</span>';
+    inputArea.parentElement.insertBefore(bar, inputArea);
+  }
+
+  function hideThinkingBar() {
+    var bar = document.getElementById('oc-thinking-bar');
+    if (bar) bar.remove();
+  }
+
+  // Show thinking state after reload when agent is still working
+  function enterPendingReloadState() {
+    showThinkingBar();
+    sending = true;
+    showStopButton();
+    wsChatRunId = 'pending-reload';
+    pendingSessionId = activeId;
+    streamStartTime = Date.now();
+    startStreamCounter();
+  }
+
+  function cancelStreamRender() {
+    if (streamRenderTimer) { clearTimeout(streamRenderTimer); streamRenderTimer = null; }
+    streamRenderEl = null;
+    streamRenderText = '';
+    streamRenderActive = false;
+  }
+
   // ── Loading indicator ──
-  var loadingDots = '<span style="display:inline-flex;gap:4px;vertical-align:middle;">' +
-    '<span style="width:8px;height:8px;border-radius:50%;background:#667eea;animation:oc-dot 1.2s 0s infinite both;"></span>' +
-    '<span style="width:8px;height:8px;border-radius:50%;background:#667eea;animation:oc-dot 1.2s 0.2s infinite both;"></span>' +
-    '<span style="width:8px;height:8px;border-radius:50%;background:#667eea;animation:oc-dot 1.2s 0.4s infinite both;"></span>' +
+  var loadingDots = '<span style="display:inline-flex;gap:5px;vertical-align:middle;overflow:visible;">' +
+    '<span style="width:6px;height:6px;border-radius:50%;background:#667eea;animation:oc-dot 1.4s 0s infinite both;"></span>' +
+    '<span style="width:6px;height:6px;border-radius:50%;background:#667eea;animation:oc-dot 1.4s 0.2s infinite both;"></span>' +
+    '<span style="width:6px;height:6px;border-radius:50%;background:#667eea;animation:oc-dot 1.4s 0.4s infinite both;"></span>' +
     '</span>';
 
   function showLoading(container) {
-    // Inject animation if not already present
+    // Inject animation if not already present (opacity-only to avoid clipping with overflow-x:hidden)
     if (!document.getElementById('oc-loading-style')) {
       var style = document.createElement('style');
       style.id = 'oc-loading-style';
-      style.textContent = '@keyframes oc-dot{0%,80%,100%{opacity:0.3;transform:scale(0.8)}40%{opacity:1;transform:scale(1.2)}}';
+      style.textContent = '@keyframes oc-dot{0%,80%,100%{opacity:0.2}40%{opacity:1}}';
       document.head.appendChild(style);
     }
     // Allow per-version custom loading
@@ -336,10 +658,60 @@
   function abortGeneration() {
     if (!sending) return;
     if (wsHasReadScope && ws && ws.readyState === 1) {
-      wsSend({ type: 'req', id: 'abort-' + Date.now(), method: 'chat.abort', params: { sessionKey: wsSessionKey, runId: wsChatRunId || undefined } });
+      // Don't send placeholder runId — abort by sessionKey only to catch all active runs
+      var abortRunId = (wsChatRunId && wsChatRunId !== 'pending-reload') ? wsChatRunId : undefined;
+      wsSend({ type: 'req', id: 'abort-' + Date.now(), method: 'chat.abort', params: { sessionKey: wsSessionKey, runId: abortRunId } });
     }
     if (httpReader) { try { httpReader.cancel(); } catch(e) {} httpReader = null; }
-    addActivity('system', 'Generation stopped');
+    cancelStreamRender();
+    var hadQueued = messageQueue.length;
+    messageQueue = []; saveQueue(); // Clear queue on manual abort
+    renderQueueUI();
+    addActivity('system', 'Generation stopped' + (hadQueued > 0 ? ' (' + hadQueued + ' queued cleared)' : ''));
+    // Reset state but don't process queue (we just cleared it)
+    hideLoading();
+    sending = false;
+    restoreSendButton();
+    stopStreamCounter();
+    clearSendTimeout();
+    pendingFullText = '';
+    pendingSessionId = '';
+    wsChatRunId = '';
+    wsChatBotEl = null;
+    wsChatFullText = '';
+    wsChatGotFirst = false;
+  }
+
+  // Reset sending state when stuck or disconnected
+  function resetSendingState(reason) {
+    if (!sending) return;
+    cancelStreamRender();
+    hideLoading();
+    sending = false;
+    restoreSendButton();
+    stopStreamCounter();
+    pendingFullText = '';
+    pendingSessionId = '';
+    wsChatRunId = '';
+    wsChatBotEl = null;
+    wsChatFullText = '';
+    wsChatGotFirst = false;
+    clearSendTimeout();
+    addActivity('error', reason || 'Connection lost during generation');
+    processQueue(); // Try next queued message
+  }
+
+  function startSendTimeout() {
+    clearSendTimeout();
+    sendTimeoutId = setTimeout(function() {
+      if (sending) {
+        resetSendingState('Generation timed out (no response for ' + Math.round(SEND_TIMEOUT_MS / 1000) + 's)');
+      }
+    }, SEND_TIMEOUT_MS);
+  }
+
+  function clearSendTimeout() {
+    if (sendTimeoutId) { clearTimeout(sendTimeoutId); sendTimeoutId = null; }
   }
 
   function restoreSendButton() {
@@ -350,6 +722,8 @@
       btn.classList.remove('oc-abort-mode');
       delete btn.dataset.ocOriginal;
     }
+    hideThinkingBar();
+    clearBusy();
   }
 
   function showStopButton() {
@@ -371,19 +745,41 @@
   var wsChatGotFirst = false;
   var availableModels = [];
 
+  function extractMessageText(p) {
+    if (!p || !p.message) return '';
+    var c = p.message.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) return c.map(function(x) { return x.text || ''; }).join('');
+    return '';
+  }
+
   function handleWsChatEvent(msg) {
     if (!sending || !wsChatRunId) return false;
     if (msg.type !== 'event') return false;
     var p = msg.payload;
-    if (!p || p.runId !== wsChatRunId) return false;
+    if (!p) return false;
+
+    // Match by runId OR sessionKey (ACPX may use different runId for events)
+    var runMatch = (p.runId === wsChatRunId);
+    var sessionMatch = (p.sessionKey === wsSessionKey);
+    if (!runMatch && !sessionMatch) return false;
+    if (!runMatch && sessionMatch && p.runId && msg.event === 'chat') {
+      wsChatRunId = p.runId; // Adopt server's runId
+    }
 
     var container = document.getElementById('oc-messages');
     if (!container) return false;
     var s = getSession();
 
-    if (msg.event === 'agent' && p.stream === 'assistant' && p.data) {
-      var text = p.data.text || '';
-      if (text && !wsChatGotFirst) {
+    // Handle streaming text — from chat.delta OR agent assistant events
+    var streamText = '';
+    if (msg.event === 'chat' && p.state === 'delta') {
+      streamText = extractMessageText(p);
+    } else if (msg.event === 'agent' && p.stream === 'assistant' && p.data) {
+      streamText = p.data.text || '';
+    }
+    if (streamText) {
+      if (!wsChatGotFirst) {
         wsChatGotFirst = true;
         hideLoading();
         if (window.ocRenderBotMsg) {
@@ -396,47 +792,76 @@
           wsChatBotEl = div;
         }
       }
-      if (text) {
-        wsChatFullText = text;
-        pendingFullText = text;
-        if (wsChatBotEl) {
-          if (window.ocOnStreamChunk) window.ocOnStreamChunk(wsChatBotEl, text);
-          else wsChatBotEl.textContent = text;
-        }
-        scrollBottom(container);
-      }
+      wsChatFullText = streamText;
+      pendingFullText = streamText;
+      startSendTimeout();
+      if (wsChatBotEl) applyStreamText(wsChatBotEl, streamText);
+      scrollBottom(container);
       return true;
     }
+    // Consume empty agent assistant events
+    if (msg.event === 'agent' && p.stream === 'assistant') return true;
 
     // Consume lifecycle start/end for the active run (suppress "Agent spawned"/"Agent finished" noise)
     if (msg.event === 'agent' && p.stream === 'lifecycle' && p.data) {
-      if (p.data.phase === 'start') return true; // silently consume
+      if (p.data.phase === 'start') { startSendTimeout(); return true; } // agent started, reset timeout
       if (p.data.phase === 'end') return true;   // chat 'final' handles completion
     }
 
     if (msg.event === 'chat' && p.state === 'final') {
-      var content = '';
-      if (p.message && p.message.content) {
-        if (typeof p.message.content === 'string') content = p.message.content;
-        else if (Array.isArray(p.message.content)) {
-          content = p.message.content.map(function(c) { return c.text || ''; }).join('');
-        }
-      }
+      cancelStreamRender();
+      var content = extractMessageText(p);
       if (!content) content = wsChatFullText;
       if (!wsChatGotFirst) hideLoading();
-      if (s) {
+
+      if (s && content && content.trim()) {
+        // Content available — render directly
+        if (!wsChatBotEl) {
+          if (window.ocRenderBotMsg) {
+            wsChatBotEl = window.ocRenderBotMsg(container);
+          } else {
+            var div = document.createElement('div');
+            div.className = 'oc-msg oc-msg-bot';
+            div.style.cssText = 'padding:8px 12px;margin-bottom:8px;border-radius:8px;background:rgba(34,197,94,0.1);font-size:14px;line-height:1.6;';
+            container.appendChild(div);
+            wsChatBotEl = div;
+          }
+        }
         s.history.push({ role: 'assistant', content: content });
         s.messages.push({ role: 'assistant', content: content });
         addActivity('receive', content.length > 60 ? content.slice(0, 60) + '...' : content);
         if (wsChatBotEl && window.ocRenderMarkdown) {
           wsChatBotEl.innerHTML = window.ocRenderMarkdown(content);
+        } else if (wsChatBotEl) {
+          wsChatBotEl.textContent = content;
         }
         saveAll();
         renderSidebar();
+      } else if (s) {
+        // ACPX persistent sessions: content not in chat.final event
+        // Remove empty bot bubble if one was created
+        if (wsChatBotEl && wsChatBotEl.parentElement) {
+          var msgEl = wsChatBotEl.closest('.message') || wsChatBotEl.closest('.oc-msg');
+          if (msgEl) msgEl.remove(); else wsChatBotEl.remove();
+        }
+        // Keep sending=true — agent may still be working. Switch to pending-reload mode.
+        wsChatRunId = 'pending-reload';
+        wsChatBotEl = null;
+        wsChatFullText = '';
+        wsChatGotFirst = false;
+        pendingFullText = '';
+        showThinkingBar();
+        // Poll history to get the response once ACPX persists it
+        setTimeout(function() {
+          wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+        }, 2000);
+        wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+        return true;
       }
       sending = false;
       restoreSendButton();
       stopStreamCounter();
+      clearSendTimeout();
       pendingFullText = '';
       pendingSessionId = '';
       wsChatRunId = '';
@@ -445,6 +870,7 @@
       wsChatGotFirst = false;
       scrollBottom(container);
       wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+      processQueue();
       return true;
     }
 
@@ -454,25 +880,41 @@
       sending = false;
       restoreSendButton();
       stopStreamCounter();
+      clearSendTimeout();
       wsChatRunId = '';
+      processQueue();
       return true;
     }
 
+    // Tool events for active run — reset timeout (agent is alive), but let them fall through to activity panel
+    if (msg.event === 'agent' && p.stream === 'tool') {
+      startSendTimeout(); // Agent is using tools, reset timeout
+    }
     return false;
   }
 
   // ── Send ──
   function send(text) {
-    if (sending || !text.trim()) return;
+    if (!text.trim()) return;
     var container = document.getElementById('oc-messages');
     if (!container) return;
     if (!token) { showTokenPrompt(container, text); return; }
+
+    // Queue message if already sending
+    if (sending) {
+      messageQueue.push(text); saveQueue();
+      renderQueueUI();
+      addActivity('queued', 'Queued: ' + (text.length > 40 ? text.slice(0, 40) + '...' : text));
+      return;
+    }
 
     var s = getSession();
     if (!s) return;
 
     sending = true;
+    markBusy();
     showStopButton();
+    startSendTimeout();
     pendingFullText = '';
     pendingSessionId = activeId;
     streamStartTime = Date.now();
@@ -488,6 +930,7 @@
     }
     saveAll();
     showLoading(container);
+    showThinkingBar();
 
     // Prefer WebSocket chat.send (persistent session) over HTTP (stateless)
     if (wsHasReadScope && ws && ws.readyState === 1) {
@@ -530,6 +973,7 @@
         sending = false;
         restoreSendButton();
         stopStreamCounter();
+        clearSendTimeout();
         pendingSessionId = '';
         showTokenPrompt(container, text);
         return;
@@ -545,6 +989,7 @@
       function read() {
         return reader.read().then(function(result) {
           if (result.done) {
+            cancelStreamRender();
             if (!gotFirstChunk) hideLoading(); // stream ended with no content
             s.history.push({ role: 'assistant', content: fullText });
             s.messages.push({ role: 'assistant', content: fullText });
@@ -558,11 +1003,13 @@
             sending = false;
             restoreSendButton();
             stopStreamCounter();
+            clearSendTimeout();
             pendingFullText = '';
             pendingSessionId = '';
             scrollBottom(container);
             // Refresh stats after response completes
             wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+            processQueue();
             return;
           }
           buffer += decoder.decode(result.value, { stream: true });
@@ -593,8 +1040,7 @@
                 }
                 fullText += delta.content;
                 pendingFullText = fullText;
-                if (window.ocOnStreamChunk) { window.ocOnStreamChunk(botEl, fullText); }
-                else { botEl.textContent = fullText; }
+                applyStreamText(botEl, fullText);
                 scrollBottom(container);
               }
             } catch(e) {}
@@ -621,8 +1067,172 @@
       sending = false;
       restoreSendButton();
       stopStreamCounter();
+      clearSendTimeout();
       pendingSessionId = '';
+      processQueue();
     });
+  }
+
+  // ── Process queued messages ──
+  function processQueue() {
+    if (messageQueue.length === 0) return;
+    var nextText = messageQueue.shift(); saveQueue();
+    renderQueueUI();
+    // Send via the normal send() flow after a short delay
+    setTimeout(function() { send(nextText); }, 500);
+  }
+
+  // ── Queue UI ──
+  function getQueueContainer() {
+    var el = document.getElementById('oc-queue');
+    if (!el) {
+      // Create queue container above the input area
+      var inputArea = document.querySelector('.input-area') || document.querySelector('.chat-input-area');
+      if (!inputArea) return null;
+      el = document.createElement('div');
+      el.id = 'oc-queue';
+      inputArea.parentElement.insertBefore(el, inputArea);
+    }
+    return el;
+  }
+
+  // Steer: interrupt agent and send message immediately
+  function steerAgent(text) {
+    if (!text || !text.trim()) return;
+    if (!wsHasReadScope || !ws || ws.readyState !== 1) return;
+    addActivity('system', 'Steering agent: ' + (text.length > 40 ? text.slice(0, 40) + '...' : text));
+    // Use sessions.steer to interrupt the active run and send new message
+    var steerRunId = 'steer-' + Date.now();
+    wsSend({
+      type: 'req', id: 'st-' + steerRunId, method: 'sessions.steer',
+      params: { key: wsSessionKey, message: text }
+    });
+    // Add to local history
+    var s = getSession();
+    if (s) {
+      s.messages.push({ role: 'user', content: text });
+      s.history.push({ role: 'user', content: text });
+      var container = document.getElementById('oc-messages');
+      if (container) { renderMessage(container, 'user', text); scrollBottom(container); }
+      saveAll();
+      renderSidebar();
+    }
+    // Reset into sending state for the steered message
+    hideThinkingBar();
+    sending = true;
+    markBusy();
+    showStopButton();
+    wsChatRunId = 'pending-reload'; // Will be resolved by chat.final or history
+    showThinkingBar();
+    startSendTimeout();
+  }
+
+  function renderQueueUI() {
+    var el = getQueueContainer();
+    if (!el) return;
+    if (messageQueue.length === 0) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+      return;
+    }
+    el.style.display = 'block';
+    var isAgentBusy = sending;
+    el.innerHTML =
+      '<div class="oc-queue-header">' +
+        '<span class="oc-queue-title">\uD83D\uDCCB Queued (' + messageQueue.length + ')</span>' +
+        '<button class="oc-queue-clear" title="Clear all">Clear all</button>' +
+      '</div>' +
+      '<div class="oc-queue-items">' +
+      messageQueue.map(function(text, idx) {
+        return '<div class="oc-queue-item" data-qi="' + idx + '">' +
+          '<span class="oc-queue-num">' + (idx + 1) + '</span>' +
+          '<textarea class="oc-queue-input" data-qidx="' + idx + '" rows="1">' + escHtml(text) + '</textarea>' +
+          '<div class="oc-queue-actions">' +
+            (isAgentBusy ? '<button class="oc-queue-steer" data-qs="' + idx + '" title="Interrupt agent and send now">Steer</button>' : '') +
+            '<button class="oc-queue-cancel" data-qc="' + idx + '" title="Remove">\u00D7</button>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+      '</div>';
+
+    // Clear all
+    el.querySelector('.oc-queue-clear').addEventListener('click', function() {
+      messageQueue = []; saveQueue();
+      renderQueueUI();
+      addActivity('system', 'Queue cleared');
+    });
+    // Steer buttons
+    el.querySelectorAll('.oc-queue-steer').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var idx = parseInt(btn.getAttribute('data-qs'), 10);
+        if (idx >= 0 && idx < messageQueue.length) {
+          var text = messageQueue.splice(idx, 1)[0]; saveQueue();
+          renderQueueUI();
+          steerAgent(text);
+        }
+      });
+    });
+    // Cancel individual
+    el.querySelectorAll('.oc-queue-cancel').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var idx = parseInt(btn.getAttribute('data-qc'), 10);
+        if (idx >= 0 && idx < messageQueue.length) {
+          var removed = messageQueue.splice(idx, 1)[0]; saveQueue();
+          addActivity('system', 'Cancelled: ' + (removed.length > 40 ? removed.slice(0, 40) + '...' : removed));
+          renderQueueUI();
+        }
+      });
+    });
+    // Edit in place with auto-resize
+    el.querySelectorAll('.oc-queue-input').forEach(function(ta) {
+      // Auto-resize textarea
+      function autoResize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'; }
+      autoResize();
+      ta.addEventListener('input', function() {
+        var idx = parseInt(ta.getAttribute('data-qidx'), 10);
+        if (idx >= 0 && idx < messageQueue.length) {
+          messageQueue[idx] = ta.value;
+          saveQueue();
+        }
+        autoResize();
+      });
+      ta.addEventListener('blur', function() {
+        var idx = parseInt(ta.getAttribute('data-qidx'), 10);
+        if (idx >= 0 && idx < messageQueue.length && !messageQueue[idx].trim()) {
+          messageQueue.splice(idx, 1); saveQueue();
+          renderQueueUI();
+        }
+      });
+    });
+  }
+
+  function injectQueueStyles() {
+    if (document.getElementById('oc-queue-styles')) return;
+    var style = document.createElement('style');
+    style.id = 'oc-queue-styles';
+    style.textContent =
+      '#oc-queue{display:none;padding:8px 16px;border-top:1px solid #2a2a3a;background:#12121a;max-height:200px;overflow-y:auto;}' +
+      '.oc-queue-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}' +
+      '.oc-queue-title{font-size:11px;font-weight:600;color:#a78bfa;}' +
+      '.oc-queue-clear{background:none;border:1px solid #333;color:#888;font-size:10px;padding:2px 8px;border-radius:4px;cursor:pointer;}' +
+      '.oc-queue-clear:hover{color:#ef4444;border-color:#ef4444;}' +
+      '.oc-queue-items{display:flex;flex-direction:column;gap:4px;}' +
+      '.oc-queue-item{display:flex;align-items:flex-start;gap:6px;padding:6px 8px;background:#1a1a2e;border-radius:6px;border-left:3px solid #a78bfa;}' +
+      '.oc-queue-num{font-size:9px;color:#a78bfa;font-weight:700;flex-shrink:0;width:14px;text-align:center;padding-top:5px;}' +
+      '.oc-queue-input{flex:1;background:transparent;border:1px solid transparent;color:#ccc;font-size:12px;font-family:inherit;outline:none;padding:4px 6px;resize:none;overflow:hidden;border-radius:4px;line-height:1.5;}' +
+      '.oc-queue-input:focus{color:#fff;border-color:#a78bfa33;background:#1a1a2e;}' +
+      '.oc-queue-actions{display:flex;flex-direction:column;gap:3px;flex-shrink:0;padding-top:2px;}' +
+      '.oc-queue-steer{background:#f59e0b;color:#000;border:none;font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;cursor:pointer;white-space:nowrap;}' +
+      '.oc-queue-steer:hover{background:#d97706;}' +
+      '.oc-queue-cancel{background:none;border:none;color:#555;font-size:16px;cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0;}' +
+      '.oc-queue-cancel:hover{color:#ef4444;}' +
+      /* Light theme overrides */
+      '[data-oc-theme="light"] #oc-queue{background:#f0f4ff;border-top-color:#e5e7eb;}' +
+      '[data-oc-theme="light"] .oc-queue-item{background:#e8ecf5;}' +
+      '[data-oc-theme="light"] .oc-queue-input{color:#333;}' +
+      '[data-oc-theme="light"] .oc-queue-input:focus{color:#000;background:#fff;}' +
+      '[data-oc-theme="light"] .oc-queue-clear{border-color:#ccc;color:#666;}';
+    document.head.appendChild(style);
   }
 
   // ── New Chat ──
@@ -762,6 +1372,29 @@
     var defS = sessions[activeId];
     if (defS && !defS.serverKey) { defS.serverKey = wsSessionKey; saveAll(); }
 
+    // Clean up empty messages and test texts from all sessions
+    var testPatterns = ['PINEAPPLE_TEST_123', 'say exactly: HELLO_WORLD', 'reply with just: test123',
+      'respond with exactly: Hello World Test', 'say hello in exactly 3 words',
+      'reply with exactly one word: pineapple', 'respond with exactly: PINEAPPLE_TEST_123',
+      'say hi', 'Say hello in one word'];
+    var cleaned = false;
+    function isTestMsg(c) {
+      for (var t = 0; t < testPatterns.length; t++) { if (c === testPatterns[t]) return true; }
+      return false;
+    }
+    Object.keys(sessions).forEach(function(sid) {
+      var sess = sessions[sid];
+      if (sess.messages) {
+        var before = sess.messages.length;
+        sess.messages = sess.messages.filter(function(m) { return m.content && m.content.trim() && !isTestMsg(m.content); });
+        if (sess.messages.length < before) cleaned = true;
+      }
+      if (sess.history) {
+        sess.history = sess.history.filter(function(m) { return m.content && m.content.trim() && !isTestMsg(m.content); });
+      }
+    });
+    if (cleaned) saveAll();
+
     var input = document.getElementById('oc-input');
     var sendBtn = document.getElementById('oc-send');
     var newChatBtn = document.getElementById('oc-new-chat');
@@ -771,42 +1404,41 @@
     var container = document.getElementById('oc-messages');
     if (!input || !container) return;
 
-    // Render existing messages + sidebar + activity
+    // Inject styles and detect theme
+    if (isLightTheme()) document.body.setAttribute('data-oc-theme', 'light');
+    injectAgentLogStyles();
+    injectQueueStyles();
+    var agentLogsDiv = document.getElementById('oc-agent-logs');
+    if (!agentLogsDiv) {
+      agentLogsDiv = document.createElement('div');
+      agentLogsDiv.id = 'oc-agent-logs';
+      // Find the best parent: activity panel wrapper (flex column container)
+      var logParent = document.querySelector('.oc-activity-panel') || document.querySelector('.oc-sidebar-panel');
+      if (logParent) logParent.appendChild(agentLogsDiv);
+    }
+
+    // Load persisted agent logs
+    loadAgentLogs();
+
+    // Render existing messages + sidebar + activity + agent logs
     renderAllMessages(container);
     renderSidebar();
     renderActivity();
+    if (Object.keys(agentRuns).length > 0 && !agentLogsDismissed) renderAgentLogs();
 
     if (!token) showTokenPrompt(container, null);
 
-    // Detect unanswered user message (e.g. reload before response arrived)
-    var s = getSession();
-    if (s && s.history.length > 0 && s.history[s.history.length - 1].role === 'user' && token) {
-      var lastUserText = s.history[s.history.length - 1].content;
-      var retryDiv = document.createElement('div');
-      retryDiv.id = 'oc-retry-notice';
-      retryDiv.style.cssText = 'padding:10px 14px;margin-bottom:8px;border-radius:8px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#fbbf24;display:flex;align-items:center;justify-content:space-between;gap:8px;';
-      retryDiv.innerHTML =
-        '<span>Last message didn\'t receive a response.</span>' +
-        '<button id="oc-retry-btn" style="padding:5px 12px;background:#fbbf24;color:#000;border:none;border-radius:5px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Retry</button>';
-      container.appendChild(retryDiv);
-      container.scrollTop = container.scrollHeight;
-      document.getElementById('oc-retry-btn').addEventListener('click', function() {
-        retryDiv.remove();
-        // Remove the unanswered user message so send() re-adds it cleanly
-        var cs = getSession();
-        if (cs) {
-          if (cs.history.length > 0 && cs.history[cs.history.length - 1].role === 'user') cs.history.pop();
-          if (cs.messages.length > 0 && cs.messages[cs.messages.length - 1].role === 'user') cs.messages.pop();
-          // Remove the rendered user message so it doesn't duplicate
-          var msgs = container.querySelectorAll('.message, .oc-msg');
-          if (msgs.length > 0) msgs[msgs.length - 1].remove();
-          saveAll();
-        }
-        send(lastUserText);
-      });
-    }
+    // Load persisted queue and render if any
+    loadQueue();
+    if (messageQueue.length > 0) renderQueueUI();
 
-    input.addEventListener('input', function() { updateInputCounter(input); });
+    // Auto-resize textarea as user types
+    function autoResizeInput() {
+      input.style.height = 'auto';
+      var maxH = Math.min(input.scrollHeight, 200); // Cap at 200px
+      input.style.height = maxH + 'px';
+    }
+    input.addEventListener('input', function() { updateInputCounter(input); autoResizeInput(); });
     input.addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -877,16 +1509,47 @@
                 }
               });
             });
-          } else if (msg.type === 'res' && msg.ok && !msg.error) {
+          } else if (msg.type === 'res') {
+            // Handle error responses (chat.send fail, abort fail, etc.)
+            if (msg.error || msg.ok === false) {
+              if (msg.id && msg.id.startsWith('cs-')) {
+                addActivity('error', 'Send failed: ' + (msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown'));
+                resetSendingState('Send failed: ' + (msg.error ? msg.error.message : 'unknown'));
+              }
+              if (msg.id && msg.id.startsWith('abort-')) {
+                addActivity('error', 'Abort failed: ' + (msg.error ? msg.error.message : 'unknown'));
+              }
+              if (msg.id && msg.id.startsWith('st-')) {
+                addActivity('error', 'Steer failed: ' + (msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown'));
+              }
+            }
             // After connect success, fetch stats + history + models
             if (msg.payload && msg.payload.type === 'hello-ok') {
               wsHasReadScope = true;
               wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
               wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
               wsSend({ type: 'req', id: 'ml', method: 'models.list', params: {} });
+              // Subscribe to real-time message events for this session (cross-tab sync)
+              wsSend({ type: 'req', id: 'ms', method: 'sessions.messages.subscribe', params: { key: wsSessionKey } });
+              // Agent busy detection now handled by sessions.list response (status === 'running')
             }
-            // Handle sessions.list response → update stats + model subtitle
+            // Handle sessions.list response → update stats + model subtitle + detect busy
             if (msg.id === 'sl' && msg.payload && msg.payload.sessions) {
+              // Check if main session agent is currently running (cross-browser detection)
+              var mainSess = null;
+              for (var si = 0; si < msg.payload.sessions.length; si++) {
+                if (msg.payload.sessions[si].key === wsSessionKey) { mainSess = msg.payload.sessions[si]; break; }
+              }
+              if (mainSess && mainSess.status === 'running') {
+                serverSessionRunning = true;
+                if (!sending) enterPendingReloadState();
+              } else {
+                serverSessionRunning = false;
+                // Agent stopped — clear pending state if we were waiting
+                if (sending && wsChatRunId === 'pending-reload') {
+                  wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+                }
+              }
               var sess = msg.payload.sessions;
               var defaults = msg.payload.defaults || {};
               if (sess.length > 0) {
@@ -922,6 +1585,10 @@
                 saveAll();
               }
             }
+            // Handle chat.abort success response
+            if (msg.id && msg.id.startsWith('abort-') && msg.payload && msg.payload.ok) {
+              addActivity('system', 'Abort confirmed' + (msg.payload.aborted ? '' : ' (no active run)'));
+            }
             // Handle sessions.patch response → update resolved model
             if (msg.id && msg.id.startsWith('sp-') && msg.payload && msg.payload.resolved) {
               var resolved = msg.payload.resolved;
@@ -937,7 +1604,11 @@
         } catch(e) {}
       };
 
-      ws.onclose = function() { ws = null; wsHasReadScope = false; setTimeout(function() { connectWs(); }, 5000); };
+      ws.onclose = function() {
+        ws = null; wsHasReadScope = false;
+        if (sending) resetSendingState('WebSocket disconnected during generation');
+        setTimeout(function() { connectWs(); }, 5000);
+      };
       ws.onerror = function() {};
     }).catch(function() {
       // Ed25519 not supported — fallback to simple webchat-ui connection
@@ -958,7 +1629,11 @@
           } else if (msg.type === 'event') { handleWsEvent(msg.event, msg.payload); }
         } catch(e) {}
       };
-      ws.onclose = function() { ws = null; setTimeout(function() { connectWs(); }, 5000); };
+      ws.onclose = function() {
+        ws = null;
+        if (sending) resetSendingState('WebSocket disconnected during generation');
+        setTimeout(function() { connectWs(); }, 5000);
+      };
       ws.onerror = function() {};
     });
   }
@@ -969,21 +1644,67 @@
 
   function handleWsEvent(event, payload) {
     if (!payload) return;
+    var runId = payload.runId || '';
 
     if (event === 'agent') {
       var stream = payload.stream || '';
       var d = payload.data || {};
+
       if (stream === 'lifecycle') {
-        if (d.phase === 'start') addActivity('system', 'Agent spawned');
-        else if (d.phase === 'end') addActivity('system', 'Agent finished' + (d.stopReason ? ' (' + d.stopReason + ')' : ''));
-        else if (d.phase === 'error') addActivity('error', 'Agent error: ' + (d.error || d.errorMessage || 'unknown'));
+        if (d.phase === 'start') {
+          addActivity('system', 'Agent spawned');
+          // Create agent log tab
+          var label = d.agentId || d.name || 'Agent';
+          if (runId) onAgentStart(runId, label);
+        } else if (d.phase === 'end') {
+          var reason = d.stopReason || '';
+          addActivity('system', 'Agent finished' + (reason ? ' (' + reason + ')' : ''));
+          if (runId) onAgentEnd(runId, reason);
+        } else if (d.phase === 'error') {
+          addActivity('error', 'Agent error: ' + (d.error || d.errorMessage || 'unknown'));
+          if (runId) {
+            addAgentLog(runId, 'error', d.error || d.errorMessage || 'Unknown error');
+            onAgentEnd(runId, 'error');
+          }
+        }
       } else if (stream === 'tool') {
-        if (d.phase === 'start') addActivity('system', 'Tool: ' + (d.name || d.title || 'unknown'));
+        var toolName = d.name || d.title || 'unknown';
+        if (d.phase === 'start') {
+          addActivity('system', 'Tool: ' + toolName);
+          if (runId && agentRuns[runId]) {
+            addAgentLog(runId, 'tool', toolName + (d.input ? ': ' + (typeof d.input === 'string' ? d.input.slice(0, 100) : JSON.stringify(d.input).slice(0, 100)) : ''));
+          }
+        } else if (d.phase === 'end' || d.phase === 'result') {
+          if (runId && agentRuns[runId]) {
+            var result = d.result || d.partialResult || '';
+            if (typeof result !== 'string') result = JSON.stringify(result);
+            addAgentLog(runId, 'tool', toolName + ' \u2192 ' + (result.length > 120 ? result.slice(0, 120) + '...' : result));
+          }
+        }
+      } else if (stream === 'assistant') {
+        // Agent text output — keep one rolling "output" entry instead of many deltas
+        if (runId && agentRuns[runId] && d.text) {
+          agentRuns[runId]._currentText = d.text;
+          var logs = agentRuns[runId].logs;
+          // Find or create the rolling output entry
+          var outputEntry = null;
+          for (var li = logs.length - 1; li >= 0; li--) {
+            if (logs[li].type === 'output') { outputEntry = logs[li]; break; }
+            if (logs[li].type !== 'assistant' && logs[li].type !== 'output') break; // stop at non-text entries
+          }
+          var preview = d.text.length > 250 ? '...' + d.text.slice(-250) : d.text;
+          if (outputEntry) {
+            outputEntry.text = preview;
+            outputEntry.time = Date.now();
+          } else {
+            logs.push({ type: 'output', text: preview, time: Date.now() });
+          }
+          if (activeAgentTab === runId) renderAgentLogEntries();
+        }
       }
     }
 
     if (event === 'health') {
-      // Extract model/session info from health event
       var stats = {};
       if (payload.agents && payload.agents.length > 0) {
         var agent = payload.agents[0];
@@ -1000,9 +1721,23 @@
       if (window.ocUpdateStats) window.ocUpdateStats(payload);
     }
 
+    // Real-time session message — just trigger a history refresh to stay in sync
+    if (event === 'session.message' && payload && payload.sessionKey === wsSessionKey) {
+      // Debounce: don't re-fetch if we just sent a message ourselves
+      if (!sending || wsChatRunId === 'pending-reload') {
+        wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+      }
+    }
+
     if (event === 'session.tool') {
       var td = payload.data || payload;
-      if (td.phase === 'start') addActivity('system', 'Tool: ' + (td.name || td.title || 'unknown'));
+      var tRunId = payload.runId || '';
+      if (td.phase === 'start') {
+        addActivity('system', 'Tool: ' + (td.name || td.title || 'unknown'));
+        if (tRunId && agentRuns[tRunId]) {
+          addAgentLog(tRunId, 'tool', (td.name || td.title || 'unknown'));
+        }
+      }
     }
   }
 
@@ -1015,19 +1750,62 @@
   // ── Server-side history loading ──
   function loadServerHistory(serverMsgs) {
     var s = getSession();
-    if (!s || !serverMsgs || serverMsgs.length === 0) return;
-    // Only replace if server has more data or local is empty
-    if (s.messages.length >= serverMsgs.length) return;
-    s.messages = serverMsgs.map(function(m) {
+    if (!s || !serverMsgs) return;
+    var container = document.getElementById('oc-messages');
+
+    var serverParsed = serverMsgs.map(function(m) {
       var content = typeof m.content === 'string' ? m.content :
         (Array.isArray(m.content) ? m.content.map(function(c) { return c.text || ''; }).join('') : '');
+      // Strip server metadata from user messages
+      if (m.role === 'user' && content) content = stripServerMetadata(content);
       return { role: m.role, content: content };
-    }).filter(function(m) { return m.role === 'user' || m.role === 'assistant'; });
-    s.history = s.messages.slice();
-    saveAll();
-    var container = document.getElementById('oc-messages');
-    if (container) renderAllMessages(container);
-    renderSidebar();
+    }).filter(function(m) { return (m.role === 'user' || m.role === 'assistant') && m.content && m.content.trim(); });
+
+    // Server is the source of truth — replace local if different
+    var serverLen = serverParsed.length;
+    var localLen = s.messages.length;
+
+    // Check if local matches server (compare last message)
+    var inSync = (serverLen === localLen);
+    if (inSync && serverLen > 0) {
+      var sLast = serverParsed[serverLen - 1];
+      var lLast = s.messages[localLen - 1];
+      if (sLast.role !== lLast.role || sLast.content !== lLast.content) inSync = false;
+    }
+
+    if (!inSync && serverLen > 0) {
+      s.messages = serverParsed.slice();
+      s.history = serverParsed.slice();
+      if (container) renderAllMessages(container);
+      saveAll();
+      scrollBottom(container);
+      renderSidebar();
+    }
+
+    // Detect agent busy state from server
+    var serverLastRole = serverParsed.length > 0 ? serverParsed[serverParsed.length - 1].role : 'none';
+    if (sending && wsChatRunId === 'pending-reload') {
+      if (serverLastRole === 'assistant' && !serverSessionRunning) {
+        // Agent responded AND session is idle — clear pending
+        sending = false;
+        restoreSendButton();
+        stopStreamCounter();
+        clearSendTimeout();
+        wsChatRunId = '';
+        pendingSessionId = '';
+        processQueue();
+      } else {
+        // Agent still working — refresh sessions.list + chat.history periodically
+        setTimeout(function() {
+          if (sending && wsChatRunId === 'pending-reload') {
+            wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+            wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+          }
+        }, 5000);
+      }
+    } else if (serverLastRole === 'user' && !sending) {
+      enterPendingReloadState();
+    }
   }
 
   // ── Model picker ──
@@ -1089,6 +1867,81 @@
   window.ocClearAllSessions = clearAllSessions;
   window.ocAbortGeneration = abortGeneration;
   window.ocSwitchModel = switchModel;
+
+  // ── Cross-tab sync via storage event ──
+  // When another tab changes localStorage, re-render to stay in sync
+  window.addEventListener('storage', function(e) {
+    if (!e.key) return;
+    var container = document.getElementById('oc-messages');
+
+    if (e.key === STORE_KEY) {
+      // Sessions/messages changed in another tab
+      try {
+        if (e.newValue) {
+          sessions = JSON.parse(e.newValue);
+          if (!activeId || !sessions[activeId]) activeId = Object.keys(sessions)[0] || '';
+          if (container) renderAllMessages(container);
+          renderSidebar();
+          renderActivity();
+        }
+      } catch(ex) {}
+    }
+
+    if (e.key === ACTIVE_KEY && e.newValue) {
+      // Active session switched in another tab
+      if (e.newValue !== activeId && sessions[e.newValue]) {
+        activeId = e.newValue;
+        wsSessionKey = sessions[activeId].serverKey || 'agent:claude:main';
+        if (container) renderAllMessages(container);
+        renderSidebar();
+        renderActivity();
+      }
+    }
+
+    if (e.key === QUEUE_KEY) {
+      // Queue changed in another tab
+      try {
+        messageQueue = e.newValue ? JSON.parse(e.newValue) : [];
+        renderQueueUI();
+      } catch(ex) {}
+    }
+
+    if (e.key === AGENT_LOGS_KEY) {
+      // Agent logs changed in another tab
+      try {
+        if (e.newValue) {
+          var data = JSON.parse(e.newValue);
+          agentRuns = data.runs || {};
+          activeAgentTab = data.active || '';
+          agentLogsDismissed = data.dismissed || false;
+          if (!activeAgentTab || !agentRuns[activeAgentTab]) {
+            var ids = Object.keys(agentRuns);
+            activeAgentTab = ids.length > 0 ? ids[ids.length - 1] : '';
+          }
+          renderAgentLogs();
+        } else {
+          agentRuns = {};
+          activeAgentTab = '';
+          renderAgentLogs();
+        }
+      } catch(ex) {}
+    }
+
+    if (e.key === BUSY_KEY) {
+      // Sending state changed in another tab
+      if (e.newValue && !sending) {
+        enterPendingReloadState();
+      } else if (!e.newValue && sending && wsChatRunId === 'pending-reload') {
+        sending = false;
+        restoreSendButton();
+        stopStreamCounter();
+        clearSendTimeout();
+        wsChatRunId = '';
+        // Refresh messages from server
+        wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+      }
+    }
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function() { init(); connectWs(); });

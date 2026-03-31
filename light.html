@@ -350,6 +350,24 @@
             padding: 4px;
             min-height: 0;
         }
+
+        /* Agent stream logs - light theme overrides */
+        #oc-agent-logs {
+            display: none;
+            flex-direction: column;
+            border-top: 1px solid #e5e7eb;
+            min-height: 120px;
+            flex: 1;
+            overflow: hidden;
+        }
+        .oc-alog-header { background: #f8f9fa !important; border-bottom-color: #e5e7eb !important; }
+        .oc-alog-title { color: #333 !important; }
+        .oc-alog-close:hover { color: #ef4444 !important; }
+        .oc-alog-tabs { background: #fff !important; border-bottom-color: #e5e7eb !important; }
+        .oc-alog-tab { color: #666 !important; border-right-color: #e5e7eb !important; }
+        .oc-alog-tab.active { background: #ecfdf5 !important; color: #10a37f !important; }
+        .oc-alog-entry { color: #555 !important; border-left-color: #ddd !important; }
+        .oc-alog-time { color: #999 !important; }
     </style>
 </head>
 <body>

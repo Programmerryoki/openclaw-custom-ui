@@ -60,9 +60,13 @@
     return s;
   }
 
+  // Check if a string is visually empty (whitespace, zero-width chars, control chars)
+  var INVISIBLE_RE = /^[\s\u200B\u200C\u200D\u200E\u200F\u2060\u2061\u2062\u2063\u2064\uFEFF\u00A0\u00AD\u2028\u2029\u034F\u061C\u180E\u2000-\u200A\u202A-\u202E\u2066-\u2069]*$/;
+  function isVisuallyEmpty(s) { return !s || INVISIBLE_RE.test(s); }
+
   // ── Block-level markdown ──
   function renderMarkdown(text) {
-    if (!text) return '';
+    if (!text || isVisuallyEmpty(text)) return '';
     var lines = text.split('\n');
     var html = '';
     var i = 0;
@@ -93,20 +97,22 @@
       if (line.trim().startsWith('```')) {
         var lang = line.trim().slice(3).trim();
         var codeLines = [];
+        var closedBlock = false;
         i++;
         while (i < lines.length && !lines[i].trim().startsWith('```')) {
           codeLines.push(lines[i]);
           i++;
         }
-        if (i < lines.length) i++; // skip closing ```
+        if (i < lines.length) { i++; closedBlock = true; } // skip closing ```
         var code = codeLines.join('\n');
         var langLabel = lang ? '<div class="oc-code-lang">' + esc(lang) + '</div>' : '';
-        html += '<div class="oc-code-block">' + langLabel + '<pre><code>' + highlightCode(code, lang) + '</code></pre></div>';
+        // Show unclosed blocks with a visual indicator (streaming)
+        html += '<div class="oc-code-block">' + langLabel + '<pre><code>' + highlightCode(code, lang) + (closedBlock ? '' : '<span style="opacity:0.3;">\u2588</span>') + '</code></pre></div>';
         continue;
       }
 
       // Close list if current line isn't a list item
-      if (inList && !/^\s*[-*+]\s/.test(line) && !/^\s*\d+[.)]\s/.test(line) && line.trim() !== '') {
+      if (inList && !/^\s*[-*+]\s/.test(line) && !/^\s*\d+[.)]\s/.test(line) && !isVisuallyEmpty(line)) {
         html += listType === 'ul' ? '</ul>' : '</ol>';
         inList = false;
       }
@@ -178,19 +184,22 @@
         continue;
       }
 
-      // Empty line
-      if (line.trim() === '') {
+      // Empty / invisible line — skip all consecutive blanks (paragraph margin handles spacing)
+      if (isVisuallyEmpty(line)) {
         if (inList) {
           html += listType === 'ul' ? '</ul>' : '</ol>';
           inList = false;
         }
-        html += '<div style="height:8px;"></div>';
-        i++;
+        while (i < lines.length && isVisuallyEmpty(lines[i])) i++;
         continue;
       }
 
-      // Paragraph
-      html += '<p style="margin:4px 0;line-height:1.7;">' + renderInline(line) + '</p>';
+      // Paragraph — skip if inline render produces nothing visible
+      var inlineHtml = renderInline(line);
+      var inlineText = inlineHtml.replace(/<[^>]*>/g, '');
+      if (!isVisuallyEmpty(inlineText)) {
+        html += '<p style="margin:6px 0;line-height:1.7;">' + inlineHtml + '</p>';
+      }
       i++;
     }
 
@@ -265,7 +274,9 @@
   // ── Public API ──
   window.ocRenderMarkdown = function(text) {
     injectStyles();
-    return '<div class="oc-rendered">' + renderMarkdown(text) + '</div>';
+    var rendered = renderMarkdown(text);
+    if (!rendered) return '';
+    return '<div class="oc-rendered">' + rendered + '</div>';
   };
 
   // Auto-inject styles on load

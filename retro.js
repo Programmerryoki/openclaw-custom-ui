@@ -12,14 +12,7 @@ function createParticles() {
 }
 createParticles();
 
-// Auto-resize textarea
-var textarea = document.getElementById('oc-input');
-if (textarea) {
-    textarea.addEventListener('input', function() {
-        this.style.height = 'auto';
-        this.style.height = (this.scrollHeight) + 'px';
-    });
-}
+// Auto-resize handled by chat.js
 
 // Version switcher localStorage sync
 document.querySelectorAll('.vsw a').forEach(function(el) {

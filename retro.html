@@ -430,6 +430,7 @@
             font-size: 10px;
             resize: none;
             min-height: 60px;
+            max-height: 200px;
         }
 
         .input-field:focus {
@@ -511,6 +512,24 @@
                 opacity: 0;
             }
         }
+        /* Agent stream logs - retro theme overrides */
+        #oc-agent-logs {
+            display: none;
+            flex-direction: column;
+            border-top: 2px solid #333;
+            min-height: 100px;
+            flex: 1;
+            overflow: hidden;
+        }
+        .oc-alog-header { background: #000 !important; border-bottom: 2px solid #333 !important; padding: 4px 8px !important; }
+        .oc-alog-title { font-family: 'Press Start 2P', monospace !important; font-size: 6px !important; color: #fbbf24 !important; }
+        .oc-alog-close { color: #ef4444 !important; font-size: 12px !important; }
+        .oc-alog-tabs { background: #1a1a2e !important; border-bottom: 2px solid #333 !important; }
+        .oc-alog-tab { font-family: 'Press Start 2P', monospace !important; font-size: 5px !important; color: #666 !important; border-right: 1px solid #333 !important; padding: 3px 6px !important; }
+        .oc-alog-tab.active { background: #000 !important; color: #10b981 !important; }
+        .oc-alog-entries { font-family: 'Press Start 2P', monospace !important; font-size: 6px !important; }
+        .oc-alog-entry { color: #10b981 !important; border-left-color: #333 !important; font-size: 6px !important; padding: 1px 4px !important; }
+        .oc-alog-time { color: #555 !important; font-size: 5px !important; }
     </style>
 </head>
 <body>
