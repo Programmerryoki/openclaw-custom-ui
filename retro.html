@@ -536,12 +536,28 @@
         .cron-badge-enabled:hover { background: rgba(34,197,94,0.4); }
         .cron-badge-disabled { font-size: 5px; background: rgba(239,68,68,0.2); color: #ef4444; padding: 2px 5px; border-radius: 2px; border: none; cursor: pointer; font-family: 'Press Start 2P', monospace; transition: all 0.15s; }
         .cron-badge-disabled:hover { background: rgba(239,68,68,0.4); }
+        .cron-badge-remove { font-size: 7px; background: rgba(150,150,150,0.2); color: #999; padding: 2px 5px; border-radius: 2px; border: none; cursor: pointer; font-family: 'Press Start 2P', monospace; transition: all 0.15s; margin-left: auto; }
+        .cron-badge-remove:hover { background: rgba(239,68,68,0.4); color: #ef4444; }
         .cron-item-schedule { font-size: 6px; color: #666; margin-top: 2px; }
         .cron-item-meta { font-size: 5px; color: #555; margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
         .cron-status-ok { color: #22c55e; }
         .cron-status-error { color: #ef4444; }
         .cron-status-skipped { color: #f59e0b; }
         .cron-empty { padding: 16px 0; text-align: center; color: #555; font-size: 6px; font-family: 'Press Start 2P', monospace; }
+
+        /* Confirmation modal */
+        .oc-confirm-overlay { position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s; }
+        .oc-confirm-overlay.active { opacity: 1; }
+        .oc-confirm-modal { background: #111; border: 2px solid #10b981; border-radius: 4px; padding: 20px; min-width: 280px; max-width: 380px; box-shadow: 0 0 20px rgba(16,185,129,0.3); transform: scale(0.95); transition: transform 0.2s; font-family: 'Press Start 2P', monospace; }
+        .oc-confirm-overlay.active .oc-confirm-modal { transform: scale(1); }
+        .oc-confirm-title { font-size: 8px; color: #10b981; margin-bottom: 10px; line-height: 1.8; }
+        .oc-confirm-detail { font-size: 6px; color: #666; margin-bottom: 16px; line-height: 2; }
+        .oc-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .oc-confirm-btn { padding: 6px 12px; border-radius: 2px; border: 1px solid #333; cursor: pointer; font-size: 6px; font-family: 'Press Start 2P', monospace; transition: all 0.15s; }
+        .oc-confirm-cancel { background: #1a1a1a; color: #666; }
+        .oc-confirm-cancel:hover { background: #222; color: #999; border-color: #555; }
+        .oc-confirm-delete { background: rgba(239,68,68,0.15); color: #ef4444; border-color: #ef4444; }
+        .oc-confirm-delete:hover { background: rgba(239,68,68,0.3); }
 
         /* Agent stream logs - retro theme overrides */
         #oc-agent-logs {

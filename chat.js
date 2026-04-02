@@ -25,8 +25,10 @@
   var lastSentMsg = null;          // { text, time } — track last sent message for sync protection
   var statusPollTimer = null;      // Periodic sessions.list poll interval
   var lastExternalTriggerMs = 0;   // Timestamp of last cron/session.message event (distinguishes real activity from heartbeat)
+  var lastChatCompletionMs = 0;   // Timestamp of last chat.final completion (prevents false re-entry into thinking state)
 
   function recentExternalTrigger() { return lastExternalTriggerMs > 0 && (Date.now() - lastExternalTriggerMs < 30000); }
+  function recentlyCompleted() { return lastChatCompletionMs > 0 && (Date.now() - lastChatCompletionMs < 15000); }
 
   function saveQueue() { try { localStorage.setItem(QUEUE_KEY, JSON.stringify(messageQueue)); } catch(e) {} }
   function loadQueue() { try { var r = localStorage.getItem(QUEUE_KEY); if (r) messageQueue = JSON.parse(r); } catch(e) {} }
@@ -658,6 +660,31 @@
     streamRenderActive = false;
   }
 
+  // ── Confirmation modal ──
+  function showConfirmModal(title, detail, onConfirm) {
+    var overlay = document.createElement('div');
+    overlay.className = 'oc-confirm-overlay';
+    var modal = document.createElement('div');
+    modal.className = 'oc-confirm-modal';
+    modal.innerHTML = '<div class="oc-confirm-title">' + escHtml(title) + '</div>' +
+      (detail ? '<div class="oc-confirm-detail">' + escHtml(detail) + '</div>' : '') +
+      '<div class="oc-confirm-actions">' +
+        '<button class="oc-confirm-btn oc-confirm-cancel">Cancel</button>' +
+        '<button class="oc-confirm-btn oc-confirm-delete">Remove</button>' +
+      '</div>';
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    // Animate in
+    requestAnimationFrame(function() { overlay.classList.add('active'); });
+    function close() { overlay.classList.remove('active'); setTimeout(function() { overlay.remove(); }, 200); }
+    overlay.querySelector('.oc-confirm-cancel').addEventListener('click', close);
+    overlay.querySelector('.oc-confirm-delete').addEventListener('click', function() { close(); onConfirm(); });
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+    // Escape key
+    function onKey(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } }
+    document.addEventListener('keydown', onKey);
+  }
+
   // ── Loading indicator ──
   var loadingDots = '<span style="display:inline-flex;gap:5px;vertical-align:middle;overflow:visible;">' +
     '<span style="width:6px;height:6px;border-radius:50%;background:#667eea;animation:oc-dot 1.4s 0s infinite both;"></span>' +
@@ -766,6 +793,7 @@
       }
     }
     sending = false;
+    lastChatCompletionMs = Date.now();
     restoreSendButton();
     stopStreamCounter();
     pendingFullText = '';
@@ -995,6 +1023,7 @@
         return true;
       }
       sending = false;
+      lastChatCompletionMs = Date.now();
       restoreSendButton();
       stopStreamCounter();
       clearSendTimeout();
@@ -1014,6 +1043,7 @@
       hideLoading();
       if (s) { addActivity('error', p.data.error || p.data.errorMessage || 'Agent error'); }
       sending = false;
+      lastChatCompletionMs = Date.now();
       restoreSendButton();
       stopStreamCounter();
       clearSendTimeout();
@@ -1875,6 +1905,15 @@
               if (msg.id === 'cl') {
                 addActivity('error', 'Cron list failed: ' + (msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown'));
               }
+              if (msg.id && msg.id.startsWith('cr-')) {
+                var crJobId = pendingCronRemove[msg.id];
+                addActivity('error', 'Cron remove via API failed — trying chat command');
+                if (crJobId) {
+                  send('/cron remove ' + crJobId);
+                  delete pendingCronRemove[msg.id];
+                }
+                setTimeout(fetchCronJobs, 5000);
+              }
               if (msg.id && msg.id.startsWith('st-')) {
                 var steerErrMsg = msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown';
                 addActivity('system', 'Steer failed (' + steerErrMsg + '), moving message to editable queue');
@@ -1946,6 +1985,7 @@
                 if (!agentRunning) {
                   // Agent finished — clear thinking bar and load response
                   sending = false;
+                  lastChatCompletionMs = Date.now();
                   restoreSendButton();
                   stopStreamCounter();
                   clearSendTimeout();
@@ -1961,8 +2001,9 @@
                     }
                   }, 5000);
                 }
-              } else if (!sending && agentRunning && (wasBusy() || recentExternalTrigger())) {
+              } else if (!sending && agentRunning && !recentlyCompleted() && (wasBusy() || recentExternalTrigger())) {
                 // Agent is running from our message, cron job, or external trigger — show thinking
+                // Skip if we just completed a chat (prevents false re-entry from stale gateway status)
                 enterPendingReloadState();
               }
               var sess = msg.payload.sessions;
@@ -1999,6 +2040,12 @@
                 cronJobs = [];
               }
               renderCronPanel();
+            }
+            // Handle cron.remove success response
+            if (msg.id && msg.id.startsWith('cr-')) {
+              delete pendingCronRemove[msg.id];
+              addActivity('system', 'Cron job removed');
+              fetchCronJobs();
             }
             // Handle sessions.create response → link local session to server key
             if (msg.id && msg.id.startsWith('sc-') && msg.payload && msg.payload.key) {
@@ -2149,7 +2196,10 @@
 
     // Real-time session message — trigger a debounced history refresh to stay in sync
     if (event === 'session.message' && payload && payload.sessionKey === wsSessionKey) {
-      lastExternalTriggerMs = Date.now();
+      // Only mark as external trigger if NOT our own completion (prevents false re-entry)
+      if (!recentlyCompleted()) {
+        lastExternalTriggerMs = Date.now();
+      }
       // Skip if actively streaming (the streaming handler already manages the display)
       if (sending && wsChatRunId && wsChatRunId !== 'pending-reload') return;
       // Debounce: coalesce rapid session.message events into one history fetch
@@ -2159,7 +2209,7 @@
         wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
       }, 2000);
       // Also check if agent just started running (e.g. from cron job or external trigger)
-      if (!sending) {
+      if (!sending && !recentlyCompleted()) {
         wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
       }
     }
@@ -2340,6 +2390,7 @@
   // ── Cron panel ──
   var cronJobs = [];
   var cronPanelVisible = false;
+  var pendingCronRemove = {}; // { reqId: jobName } — tracks in-flight cron.remove requests for fallback
 
   function fetchCronJobs() {
     if (!wsHasReadScope || !ws || ws.readyState !== 1) return;
@@ -2398,13 +2449,16 @@
       var badge = job.enabled
         ? '<button class="cron-badge cron-badge-enabled cron-toggle" data-cron-id="' + escHtml(job.id) + '" data-cron-name="' + escHtml(job.name || job.id) + '" data-cron-enabled="true" title="' + toggleTitle + '">ON</button>'
         : '<button class="cron-badge cron-badge-disabled cron-toggle" data-cron-id="' + escHtml(job.id) + '" data-cron-name="' + escHtml(job.name || job.id) + '" data-cron-enabled="false" title="' + toggleTitle + '">OFF</button>';
+      var removeBtn = !job.enabled
+        ? ' <button class="cron-badge cron-badge-remove cron-remove" data-cron-id="' + escHtml(job.id) + '" data-cron-name="' + escHtml(job.name || job.id) + '" title="Remove this job">✕</button>'
+        : '';
       var meta = [];
       if (st.nextRunAtMs) meta.push('<span>Next: ' + formatCronTime(st.nextRunAtMs) + '</span>');
       if (st.lastRunAtMs) meta.push('<span class="' + statusClass + '">Last: ' + formatCronTime(st.lastRunAtMs) + (st.lastRunStatus ? ' (' + st.lastRunStatus + ')' : '') + '</span>');
       if (st.lastDurationMs) meta.push('<span>Took: ' + (st.lastDurationMs >= 1000 ? (st.lastDurationMs / 1000).toFixed(1) + 's' : st.lastDurationMs + 'ms') + '</span>');
       if (st.lastError) meta.push('<span class="cron-status-error" title="' + escHtml(st.lastError) + '">Err: ' + escHtml(st.lastError.length > 30 ? st.lastError.slice(0, 30) + '...' : st.lastError) + '</span>');
       return '<div class="cron-item">' +
-        '<div class="cron-item-name">' + badge + ' ' + escHtml(job.name || job.id) + '</div>' +
+        '<div class="cron-item-name">' + badge + ' ' + escHtml(job.name || job.id) + removeBtn + '</div>' +
         '<div class="cron-item-schedule">' + escHtml(formatCronSchedule(job.schedule)) +
           (job.sessionTarget ? ' → ' + escHtml(job.sessionTarget) : '') + '</div>' +
         (job.description ? '<div class="cron-item-schedule" style="font-family:inherit;color:#777;">' + escHtml(job.description) + '</div>' : '') +
@@ -2428,6 +2482,29 @@
         btn.title = isEnabled ? 'Click to enable this job' : 'Click to disable this job';
         // Refresh after a delay to get server state
         setTimeout(fetchCronJobs, 5000);
+      });
+    });
+    // Wire remove buttons (only on disabled jobs)
+    listEl.querySelectorAll('.cron-remove').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var jobId = btn.dataset.cronId;
+        var jobName = btn.dataset.cronName;
+        var item = btn.closest('.cron-item');
+        showConfirmModal('Remove cron job "' + jobName + '"?', 'This will permanently delete the scheduled job.', function() {
+          // Try WebSocket cron.remove directly, fall back to chat command with job ID on error
+          if (ws && ws.readyState === 1 && jobId) {
+            var crReqId = 'cr-' + Date.now();
+            pendingCronRemove[crReqId] = jobId; // Store ID for fallback
+            wsSend({ type: 'req', id: crReqId, method: 'cron.remove', params: { id: jobId } });
+          } else {
+            // Use job ID (UUID), not name — OpenClaw's /cron remove expects an ID
+            send('/cron remove ' + (jobId || jobName));
+          }
+          // Optimistic fade-out (will reappear on refresh if failed)
+          if (item) { item.style.opacity = '0.4'; item.style.pointerEvents = 'none'; }
+          setTimeout(fetchCronJobs, 5000);
+        });
       });
     });
   }
@@ -2529,7 +2606,7 @@
 
     if (e.key === BUSY_KEY) {
       // Sending state changed in another tab
-      if (e.newValue && !sending) {
+      if (e.newValue && !sending && !recentlyCompleted()) {
         enterPendingReloadState();
       } else if (!e.newValue && sending && wsChatRunId === 'pending-reload') {
         sending = false;
