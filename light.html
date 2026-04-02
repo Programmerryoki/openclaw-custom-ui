@@ -351,6 +351,38 @@
             min-height: 0;
         }
 
+        /* Panel-level tabs (Activity / Cron) — light theme */
+        .oc-panel-tabs { display: flex; gap: 0; }
+        .oc-panel-tab { padding: 4px 12px; font-size: 11px; color: #999; background: none; border: 1px solid #ddd; cursor: pointer; transition: all 0.15s; }
+        .oc-panel-tab:first-child { border-radius: 6px 0 0 6px; }
+        .oc-panel-tab:last-child { border-radius: 0 6px 6px 0; }
+        .oc-panel-tab:not(:first-child) { border-left: none; }
+        .oc-panel-tab:hover { color: #666; }
+        .oc-panel-tab.active { background: #ecfdf5; color: #10a37f; border-color: #10a37f; }
+        #oc-activity-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+        #oc-activity-view.hidden { display: none; }
+
+        /* Cron panel — light theme */
+        #oc-cron-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+        #oc-cron-panel.active { display: flex; }
+        .cron-header { padding: 12px 16px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; }
+        .cron-header-title { font-weight: 600; font-size: 14px; color: #333; }
+        .cron-header-count { font-size: 11px; color: #999; }
+        .cron-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+        .cron-item { padding: 10px 16px; border-bottom: 1px solid #f0f0f0; cursor: default; transition: background 0.1s; }
+        .cron-item:hover { background: rgba(16,163,127,0.04); }
+        .cron-item-name { font-size: 13px; font-weight: 600; color: #333; display: flex; align-items: center; gap: 6px; }
+        .cron-badge-enabled { background: rgba(34,197,94,0.12); color: #16a34a; font-size: 9px; padding: 2px 8px; border-radius: 4px; font-weight: 700; text-transform: uppercase; border: none; cursor: pointer; transition: all 0.15s; }
+        .cron-badge-enabled:hover { background: rgba(34,197,94,0.25); }
+        .cron-badge-disabled { background: rgba(239,68,68,0.1); color: #dc2626; font-size: 9px; padding: 2px 8px; border-radius: 4px; font-weight: 700; text-transform: uppercase; border: none; cursor: pointer; transition: all 0.15s; }
+        .cron-badge-disabled:hover { background: rgba(239,68,68,0.2); }
+        .cron-item-schedule { font-size: 11px; color: #888; margin-top: 3px; font-family: Consolas, Monaco, monospace; }
+        .cron-item-meta { font-size: 10px; color: #aaa; margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap; }
+        .cron-status-ok { color: #16a34a; }
+        .cron-status-error { color: #dc2626; }
+        .cron-status-skipped { color: #d97706; }
+        .cron-empty { padding: 32px 16px; text-align: center; color: #aaa; font-size: 13px; }
+
         /* Agent stream logs - light theme overrides */
         #oc-agent-logs {
             display: none;
@@ -422,17 +454,30 @@
         <div class="artifact-panel oc-activity-panel">
             <div class="artifact-header">
                 <div class="artifact-title">Live Context &amp; Tools</div>
+                <div class="oc-panel-tabs">
+                    <button class="oc-panel-tab active" data-panel="activity">Activity</button>
+                    <button class="oc-panel-tab" data-panel="cron">Cron</button>
+                </div>
+            </div>
+            <div id="oc-activity-view">
                 <div class="artifact-tabs">
                     <button class="artifact-tab active">All</button>
                     <button class="artifact-tab">Tools</button>
                     <button class="artifact-tab">Agents</button>
                 </div>
+                <div class="artifact-content">
+                    <div class="section-label">Sessions</div>
+                    <div id="oc-sessions"></div>
+                    <div class="section-label" style="margin-top:12px;">Activity</div>
+                    <div id="oc-activity"></div>
+                </div>
             </div>
-            <div class="artifact-content">
-                <div class="section-label">Sessions</div>
-                <div id="oc-sessions"></div>
-                <div class="section-label" style="margin-top:12px;">Activity</div>
-                <div id="oc-activity"></div>
+            <div id="oc-cron-panel">
+                <div class="cron-header">
+                    <span class="cron-header-title">Scheduled Jobs</span>
+                    <span class="cron-header-count" id="oc-cron-count"></span>
+                </div>
+                <div class="cron-list" id="oc-cron-list"></div>
             </div>
         </div>
 

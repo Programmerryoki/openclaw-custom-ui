@@ -512,6 +512,37 @@
                 opacity: 0;
             }
         }
+        /* Panel tabs — retro theme */
+        .oc-panel-tabs { display: flex; gap: 0; }
+        .oc-panel-tab { padding: 3px 8px; font-size: 6px; color: #555; background: #000; border: 1px solid #333; cursor: pointer; }
+        .oc-panel-tab:first-child { border-radius: 3px 0 0 3px; }
+        .oc-panel-tab:last-child { border-radius: 0 3px 3px 0; }
+        .oc-panel-tab:not(:first-child) { border-left: none; }
+        .oc-panel-tab:hover { color: #888; }
+        .oc-panel-tab.active { background: #1a1a2e; color: #10b981; border-color: #10b981; }
+        #oc-activity-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+        #oc-activity-view.hidden { display: none; }
+
+        /* Cron panel — retro theme */
+        #oc-cron-panel { display: none; flex-direction: column; overflow: hidden; padding: 0 8px; }
+        #oc-cron-panel.active { display: flex; }
+        .cron-header { padding: 6px 0; font-family: 'Press Start 2P', monospace; font-size: 6px; color: #fbbf24; display: flex; justify-content: space-between; }
+        .cron-header-count { color: #666; }
+        .cron-list { overflow-y: auto; }
+        .cron-item { padding: 6px 0; border-bottom: 1px solid #333; font-family: 'Press Start 2P', monospace; }
+        .cron-item:hover { background: rgba(16,185,129,0.08); }
+        .cron-item-name { font-size: 7px; color: #10b981; display: flex; align-items: center; gap: 4px; }
+        .cron-badge-enabled { font-size: 5px; background: rgba(34,197,94,0.2); color: #22c55e; padding: 2px 5px; border-radius: 2px; border: none; cursor: pointer; font-family: 'Press Start 2P', monospace; transition: all 0.15s; }
+        .cron-badge-enabled:hover { background: rgba(34,197,94,0.4); }
+        .cron-badge-disabled { font-size: 5px; background: rgba(239,68,68,0.2); color: #ef4444; padding: 2px 5px; border-radius: 2px; border: none; cursor: pointer; font-family: 'Press Start 2P', monospace; transition: all 0.15s; }
+        .cron-badge-disabled:hover { background: rgba(239,68,68,0.4); }
+        .cron-item-schedule { font-size: 6px; color: #666; margin-top: 2px; }
+        .cron-item-meta { font-size: 5px; color: #555; margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .cron-status-ok { color: #22c55e; }
+        .cron-status-error { color: #ef4444; }
+        .cron-status-skipped { color: #f59e0b; }
+        .cron-empty { padding: 16px 0; text-align: center; color: #555; font-size: 6px; font-family: 'Press Start 2P', monospace; }
+
         /* Agent stream logs - retro theme overrides */
         #oc-agent-logs {
             display: none;
@@ -564,8 +595,20 @@
                 </div>
                 <button class="new-session-btn" id="oc-new-chat">+ NEW QUEST</button>
                 <div class="sessions-list" id="oc-sessions"></div>
-                <div style="padding:8px;margin-top:8px;border-top:2px solid #333;font-size:6px;font-family:'Press Start 2P',monospace;color:#666;">=== ACTIVITY ===</div>
-                <div id="oc-activity" style="padding:0 8px;font-size:9px;"></div>
+                <div class="oc-panel-tabs" style="padding:4px 8px;margin-top:8px;border-top:2px solid #333;">
+                    <button class="oc-panel-tab active" data-panel="activity" style="font-family:'Press Start 2P',monospace;font-size:5px;">ACTIVITY</button>
+                    <button class="oc-panel-tab" data-panel="cron" style="font-family:'Press Start 2P',monospace;font-size:5px;">CRON</button>
+                </div>
+                <div id="oc-activity-view">
+                    <div id="oc-activity" style="padding:0 8px;font-size:9px;"></div>
+                </div>
+                <div id="oc-cron-panel">
+                    <div class="cron-header">
+                        <span>=== CRON QUESTS ===</span>
+                        <span class="cron-header-count" id="oc-cron-count"></span>
+                    </div>
+                    <div class="cron-list" id="oc-cron-list"></div>
+                </div>
             </div>
 
             <div class="chat-area">

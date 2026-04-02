@@ -21,6 +21,12 @@
   var QUEUE_KEY = 'oc_msg_queue';
   var BUSY_KEY = 'oc_agent_busy'; // Persists sending state across reloads
   var serverSessionRunning = false; // True if sessions.list reported status=running
+  var sessionMsgDebounce = null;   // Debounce timer for session.message → chat.history
+  var lastSentMsg = null;          // { text, time } — track last sent message for sync protection
+  var statusPollTimer = null;      // Periodic sessions.list poll interval
+  var lastExternalTriggerMs = 0;   // Timestamp of last cron/session.message event (distinguishes real activity from heartbeat)
+
+  function recentExternalTrigger() { return lastExternalTriggerMs > 0 && (Date.now() - lastExternalTriggerMs < 30000); }
 
   function saveQueue() { try { localStorage.setItem(QUEUE_KEY, JSON.stringify(messageQueue)); } catch(e) {} }
   function loadQueue() { try { var r = localStorage.getItem(QUEUE_KEY); if (r) messageQueue = JSON.parse(r); } catch(e) {} }
@@ -141,7 +147,7 @@
     return lines.slice(startIdx).join('\n').trim();
   }
 
-  function renderMessage(container, role, content, timestamp) {
+  function renderMessage(container, role, content, timestamp, interrupted) {
     // Skip empty messages
     if (!content || !content.trim()) return;
     // Set timestamp for theme renderers to use
@@ -157,10 +163,11 @@
         container.appendChild(div);
       }
     } else {
+      var targetEl;
       if (window.ocRenderBotMsg) {
-        var el = window.ocRenderBotMsg(container);
-        if (window.ocRenderMarkdown) { el.innerHTML = window.ocRenderMarkdown(content); }
-        else { el.textContent = content; }
+        targetEl = window.ocRenderBotMsg(container);
+        if (window.ocRenderMarkdown) { targetEl.innerHTML = window.ocRenderMarkdown(content); }
+        else { targetEl.textContent = content; }
       } else {
         var div2 = document.createElement('div');
         div2.className = 'oc-msg oc-msg-bot';
@@ -168,6 +175,14 @@
         if (window.ocRenderMarkdown) { div2.innerHTML = window.ocRenderMarkdown(content); }
         else { div2.style.whiteSpace = 'pre-wrap'; div2.textContent = content; }
         container.appendChild(div2);
+        targetEl = div2;
+      }
+      // Show interrupted indicator for steered messages
+      if (interrupted && targetEl) {
+        var tag = document.createElement('div');
+        tag.style.cssText = 'font-size:10px;color:#f59e0b;margin-top:4px;font-style:italic;';
+        tag.textContent = '(interrupted by steer)';
+        targetEl.appendChild(tag);
       }
     }
   }
@@ -178,7 +193,8 @@
     var s = getSession();
     if (!s) return;
     for (var j = 0; j < s.messages.length; j++) {
-      renderMessage(container, s.messages[j].role, s.messages[j].content, s.messages[j].time);
+      var m = s.messages[j];
+      renderMessage(container, m.role, m.content, m.time, m.interrupted);
     }
     container.scrollTop = container.scrollHeight;
   }
@@ -245,6 +261,33 @@
   }
 
   // ── Activity Panel ──
+  // Activity filters: each button toggles a category
+  var activityFilters = { all: true, tools: true, agents: true };
+
+  function isToolActivity(a) { return a.type === 'system' && /^Tool:/i.test(a.text); }
+  function isAgentActivity(a) { return a.type === 'system' && /^Agent\b/i.test(a.text); }
+
+  function activityPassesFilter(a) {
+    if (isToolActivity(a)) return activityFilters.tools;
+    if (isAgentActivity(a)) return activityFilters.agents;
+    return activityFilters.all; // send, receive, error, queued, other system
+  }
+
+  function renderActivityFilterButtons() {
+    // Update button active states (works for both activity-tab and artifact-tab classes)
+    document.querySelectorAll('.activity-tab, .artifact-tab').forEach(function(btn) {
+      var label = btn.textContent.trim().toLowerCase();
+      var key = label === 'all' ? 'all' : label === 'tools' ? 'tools' : label === 'agents' ? 'agents' : null;
+      if (key) btn.classList.toggle('active', activityFilters[key]);
+    });
+  }
+
+  function toggleActivityFilter(key) {
+    activityFilters[key] = !activityFilters[key];
+    renderActivityFilterButtons();
+    renderActivity();
+  }
+
   function addActivity(type, text) {
     var s = getSession();
     if (!s) return;
@@ -260,12 +303,14 @@
     if (!el) return;
     var s = getSession();
     var items = (s && s.activity) ? s.activity : [];
-    if (items.length === 0) {
-      el.innerHTML = '<div style="padding:20px;text-align:center;color:#666;font-size:11px;">No activity yet</div>';
+    var filtered = items.filter(activityPassesFilter);
+    if (filtered.length === 0) {
+      el.innerHTML = '<div style="padding:20px;text-align:center;color:#666;font-size:11px;">' +
+        (items.length === 0 ? 'No activity yet' : 'No matching activity') + '</div>';
       return;
     }
     var icons = { send: '\uD83D\uDCE4', receive: '\uD83E\uDD9E', error: '\u26A0\uFE0F', system: '\u2699\uFE0F', queued: '\uD83D\uDCCB' };
-    el.innerHTML = items.slice().reverse().map(function(a) {
+    el.innerHTML = filtered.slice().reverse().map(function(a) {
       var time = a.time ? new Date(a.time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
       var icon = icons[a.type] || '\uD83D\uDD35';
       var colors = { send: '#667eea', receive: '#22c55e', error: '#ef4444', system: '#fbbf24', queued: '#a78bfa' };
@@ -318,15 +363,22 @@
   function onAgentStart(runId, label) {
     agentRuns[runId] = { label: label || 'Agent', status: 'running', logs: [], startedAt: Date.now() };
     if (!activeAgentTab) activeAgentTab = runId;
-    agentLogsDismissed = false;
+    // Only show panel if user is actively sending (not from background cron/heartbeat)
+    if (sending) agentLogsDismissed = false;
     saveAgentLogs();
-    renderAgentLogs();
+    if (!agentLogsDismissed) renderAgentLogs();
   }
 
   function onAgentEnd(runId, reason) {
     if (!agentRuns[runId]) return;
     agentRuns[runId].status = reason === 'error' ? 'error' : 'stopped';
     addAgentLog(runId, 'lifecycle', reason === 'error' ? 'Agent error' : 'Agent finished' + (reason ? ' (' + reason + ')' : ''));
+    // Prune old finished agent runs (keep max 10)
+    var ids = Object.keys(agentRuns);
+    var stoppedIds = ids.filter(function(id) { return agentRuns[id].status !== 'running'; });
+    while (stoppedIds.length > 10) {
+      delete agentRuns[stoppedIds.shift()];
+    }
     saveAgentLogs();
     renderAgentTabs();
   }
@@ -341,6 +393,8 @@
   }
 
   function closeAllAgentLogs() {
+    agentRuns = {};
+    activeAgentTab = '';
     agentLogsDismissed = true;
     saveAgentLogs();
     renderAgentLogs();
@@ -531,7 +585,7 @@
   var streamRenderEl = null;
   var streamRenderText = '';
   var streamRenderActive = false; // true once first markdown render has been applied
-  var STREAM_RENDER_INTERVAL = 300; // ms between markdown re-renders during streaming
+  var STREAM_RENDER_INTERVAL = 150; // ms between markdown re-renders during streaming
 
   function scheduleStreamRender(el, text) {
     if (!window.ocRenderMarkdown) return;
@@ -543,19 +597,21 @@
       if (streamRenderEl && streamRenderText) {
         var rendered = window.ocRenderMarkdown(streamRenderText);
         if (rendered) {
+          streamRenderEl.style.whiteSpace = ''; // Clear pre-wrap fallback
           streamRenderEl.innerHTML = rendered;
           streamRenderActive = true;
           var container = document.getElementById('oc-messages');
           if (container) container.scrollTop = container.scrollHeight;
         }
-        // If render produced nothing, keep showing textContent (don't wipe)
+        // If render produced nothing, keep showing textContent with pre-wrap
       }
     }, STREAM_RENDER_INTERVAL);
   }
 
   function applyStreamText(el, text) {
-    // Always show text immediately, then schedule formatted render
+    // Before first markdown render: show plain text with pre-wrap so newlines are visible
     if (!streamRenderActive) {
+      el.style.whiteSpace = 'pre-wrap';
       el.textContent = text;
     }
     // Schedule throttled markdown render (updates streamRenderText for pending timer)
@@ -685,10 +741,30 @@
   }
 
   // Reset sending state when stuck or disconnected
-  function resetSendingState(reason) {
+  function resetSendingState(reason, skipRecovery) {
     if (!sending) return;
     cancelStreamRender();
     hideLoading();
+    // If no bot response was received, recover the user message to queue
+    if (!skipRecovery && !wsChatGotFirst && !wsChatFullText) {
+      var rs = getSession();
+      if (rs) {
+        var recText = '';
+        for (var rsi = rs.messages.length - 1; rsi >= 0; rsi--) {
+          if (rs.messages[rsi].role === 'user') { recText = rs.messages[rsi].content; rs.messages.splice(rsi, 1); break; }
+        }
+        for (var rhi = rs.history.length - 1; rhi >= 0; rhi--) {
+          if (rs.history[rhi].role === 'user') { rs.history.splice(rhi, 1); break; }
+        }
+        if (recText) {
+          messageQueue.unshift(recText);
+          saveQueue();
+        }
+        saveAll();
+        var rCont = document.getElementById('oc-messages');
+        if (rCont) renderAllMessages(rCont);
+      }
+    }
     sending = false;
     restoreSendButton();
     stopStreamCounter();
@@ -698,15 +774,39 @@
     wsChatBotEl = null;
     wsChatFullText = '';
     wsChatGotFirst = false;
+    lastWsEventTime = 0;
     clearSendTimeout();
     addActivity('error', reason || 'Connection lost during generation');
+    renderQueueUI();
     processQueue(); // Try next queued message
   }
 
   function startSendTimeout() {
     clearSendTimeout();
     sendTimeoutId = setTimeout(function() {
-      if (sending) {
+      if (!sending) return;
+      // Check if we received any events recently (within the timeout window)
+      var silenceMs = Date.now() - lastWsEventTime;
+      if (lastWsEventTime > 0 && silenceMs < SEND_TIMEOUT_MS) {
+        // Events were received recently — agent is active, extend timeout
+        addActivity('system', 'Agent active (last event ' + Math.round(silenceMs / 1000) + 's ago) — extending timeout');
+        startSendTimeout();
+        return;
+      }
+      // No recent events — check sessions.list as a second signal
+      if (wsHasReadScope && ws && ws.readyState === 1) {
+        addActivity('system', 'No events for ' + Math.round(SEND_TIMEOUT_MS / 1000) + 's — checking if agent is still running...');
+        wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+        setTimeout(function() {
+          if (!sending) return;
+          if (serverSessionRunning) {
+            addActivity('system', 'Agent is still running — extending timeout');
+            startSendTimeout();
+          } else {
+            resetSendingState('Generation timed out (no events for ' + Math.round(SEND_TIMEOUT_MS / 1000) + 's and agent not running)');
+          }
+        }, 5000);
+      } else {
         resetSendingState('Generation timed out (no response for ' + Math.round(SEND_TIMEOUT_MS / 1000) + 's)');
       }
     }, SEND_TIMEOUT_MS);
@@ -745,6 +845,7 @@
   var wsChatBotEl = null;
   var wsChatFullText = '';
   var wsChatGotFirst = false;
+  var lastWsEventTime = 0; // Timestamp of last streaming/agent event received
   var availableModels = [];
 
   function extractMessageText(p) {
@@ -756,17 +857,49 @@
   }
 
   function handleWsChatEvent(msg) {
-    if (!sending || !wsChatRunId) return false;
     if (msg.type !== 'event') return false;
     var p = msg.payload;
     if (!p) return false;
 
+    var sessionMatch = (p.sessionKey === wsSessionKey);
+
+    // Track last event time for any event matching our session
+    if (sessionMatch && (msg.event === 'chat' || (msg.event === 'agent' && p.stream === 'assistant'))) {
+      lastWsEventTime = Date.now();
+    }
+
+    // If not in sending state, check if we should re-enter (agent resumed after timeout)
+    if (!sending && sessionMatch && msg.event !== 'agent') {
+      // Don't auto-resume for raw agent events — only for cleaned chat events
+      return false;
+    }
+    if (!sending && sessionMatch && msg.event === 'agent' && p.stream === 'assistant' && p.data && p.data.text) {
+      // Agent is still sending text after timeout — re-enter sending state
+      addActivity('system', 'Agent still active — resuming chat tracking');
+      sending = true;
+      markBusy();
+      showStopButton();
+      wsChatRunId = p.runId || 'pending-reload';
+      wsChatBotEl = null;
+      wsChatFullText = '';
+      wsChatGotFirst = false;
+      showThinkingBar();
+      startSendTimeout();
+    }
+
+    if (!sending || !wsChatRunId) return false;
+
     // Match by runId OR sessionKey (ACPX may use different runId for events)
     var runMatch = (p.runId === wsChatRunId);
-    var sessionMatch = (p.sessionKey === wsSessionKey);
     if (!runMatch && !sessionMatch) return false;
+    // After steer, wsChatRunId='pending-reload' — don't adopt the OLD run's events
+    // Only adopt when we haven't received any streaming yet (first event of new run)
     if (!runMatch && sessionMatch && p.runId && msg.event === 'chat') {
-      wsChatRunId = p.runId; // Adopt server's runId
+      if (wsChatRunId === 'pending-reload' && p.state === 'final') {
+        // Old run's final event after steer — consume silently, don't adopt
+        return true;
+      }
+      wsChatRunId = p.runId; // Adopt server's runId (new run starting)
     }
 
     var container = document.getElementById('oc-messages');
@@ -831,6 +964,7 @@
         }
         s.history.push({ role: 'assistant', content: content, time: Date.now() });
         s.messages.push({ role: 'assistant', content: content, time: Date.now() });
+        lastSentMsg = null; // Response received, message confirmed
         addActivity('receive', content.length > 60 ? content.slice(0, 60) + '...' : content);
         if (wsChatBotEl && window.ocRenderMarkdown) {
           wsChatBotEl.innerHTML = window.ocRenderMarkdown(content);
@@ -902,11 +1036,11 @@
     if (!container) return;
     if (!token) { showTokenPrompt(container, text); return; }
 
-    // Queue message if already sending
-    if (sending) {
+    // Queue message if already sending or agent is running in background
+    if (sending || serverSessionRunning) {
       messageQueue.push(text); saveQueue();
       renderQueueUI();
-      addActivity('queued', 'Queued: ' + (text.length > 40 ? text.slice(0, 40) + '...' : text));
+      addActivity('queued', 'Queued' + (serverSessionRunning && !sending ? ' (agent busy)' : '') + ': ' + (text.length > 40 ? text.slice(0, 40) + '...' : text));
       return;
     }
 
@@ -922,6 +1056,7 @@
     streamStartTime = Date.now();
     startStreamCounter();
     addActivity('send', text.length > 60 ? text.slice(0, 60) + '...' : text);
+    lastSentMsg = { text: text, time: Date.now() };
     renderMessage(container, 'user', text);
     s.messages.push({ role: 'user', content: text, time: Date.now() });
     s.history.push({ role: 'user', content: text, time: Date.now() });
@@ -1103,19 +1238,44 @@
     if (!text || !text.trim()) return;
     if (!wsHasReadScope || !ws || ws.readyState !== 1) return;
     addActivity('system', 'Steering agent: ' + (text.length > 40 ? text.slice(0, 40) + '...' : text));
+
+    // Save partial response before interrupting (so it isn't lost)
+    var s = getSession();
+    var container = document.getElementById('oc-messages');
+    if (wsChatFullText && wsChatFullText.trim() && s) {
+      var partialTime = Date.now();
+      s.messages.push({ role: 'assistant', content: wsChatFullText, time: partialTime, interrupted: true });
+      s.history.push({ role: 'assistant', content: wsChatFullText, time: partialTime, interrupted: true });
+      // Finalize the streaming bubble with rendered markdown
+      if (wsChatBotEl) {
+        if (window.ocRenderMarkdown) wsChatBotEl.innerHTML = window.ocRenderMarkdown(wsChatFullText);
+        else wsChatBotEl.textContent = wsChatFullText;
+        // Add interrupted indicator
+        var tag = document.createElement('div');
+        tag.style.cssText = 'font-size:10px;color:#f59e0b;margin-top:4px;font-style:italic;';
+        tag.textContent = '(interrupted by steer)';
+        wsChatBotEl.appendChild(tag);
+      }
+      addActivity('receive', '(interrupted) ' + (wsChatFullText.length > 40 ? wsChatFullText.slice(0, 40) + '...' : wsChatFullText));
+    }
+    // Reset streaming state
+    cancelStreamRender();
+    wsChatBotEl = null;
+    wsChatFullText = '';
+    wsChatGotFirst = false;
+    pendingFullText = '';
+
     // Use sessions.steer to interrupt the active run and send new message
     var steerRunId = 'steer-' + Date.now();
     wsSend({
       type: 'req', id: 'st-' + steerRunId, method: 'sessions.steer',
       params: { key: wsSessionKey, message: text }
     });
-    // Add to local history
-    var s = getSession();
+    // Add steer message to local history
     if (s) {
       var now = Date.now();
       s.messages.push({ role: 'user', content: text, time: now });
       s.history.push({ role: 'user', content: text, time: now });
-      var container = document.getElementById('oc-messages');
       if (container) { renderMessage(container, 'user', text, now); scrollBottom(container); }
       saveAll();
       renderSidebar();
@@ -1151,8 +1311,8 @@
           '<span class="oc-queue-num">' + (idx + 1) + '</span>' +
           '<textarea class="oc-queue-input" data-qidx="' + idx + '" rows="1">' + escHtml(text) + '</textarea>' +
           '<div class="oc-queue-actions">' +
-            (isAgentBusy ? '<button class="oc-queue-steer" data-qs="' + idx + '" title="Interrupt agent and send now">Steer</button>' : '') +
-            '<button class="oc-queue-cancel" data-qc="' + idx + '" title="Remove">\u00D7</button>' +
+            (isAgentBusy ? '<button class="oc-queue-steer" data-qs="' + idx + '" title="Interrupt agent with this message — agent stops current work and processes this instead">\u26A1 Steer</button>' : '') +
+            '<button class="oc-queue-cancel" data-qc="' + idx + '" title="Remove from queue">Remove</button>' +
           '</div>' +
         '</div>';
       }).join('') +
@@ -1209,6 +1369,113 @@
     });
   }
 
+  // ── Slash command autocomplete ──
+  var SLASH_COMMANDS = [
+    { cmd: '/stop', desc: 'Stop current generation' },
+    { cmd: '/compact', desc: 'Compact/summarize conversation context' },
+    { cmd: '/reset', desc: 'Reset the session' },
+    { cmd: '/new', desc: 'Start a new session' },
+    { cmd: '/model', desc: 'Switch model (e.g. /model anthropic/claude-sonnet-4-6)' },
+    { cmd: '/models', desc: 'List available models' },
+    { cmd: '/status', desc: 'Show session status' },
+    { cmd: '/help', desc: 'Show help' },
+    { cmd: '/think', desc: 'Set thinking level' },
+    { cmd: '/verbose', desc: 'Set verbose level' },
+    { cmd: '/reasoning', desc: 'Set reasoning level' },
+    { cmd: '/context', desc: 'Show context info' },
+    { cmd: '/config', desc: 'Show/modify config' },
+    { cmd: '/steer', desc: 'Steer the agent with new instructions' },
+    { cmd: '/queue', desc: 'Show message queue' },
+    { cmd: '/subagents', desc: 'List/manage sub-agents' },
+    { cmd: '/kill', desc: 'Kill a sub-agent' },
+    { cmd: '/usage', desc: 'Show token usage' },
+    { cmd: '/debug', desc: 'Show debug info' },
+    { cmd: '/restart', desc: 'Restart the agent' },
+    { cmd: '/elevated', desc: 'Set elevated mode' },
+    { cmd: '/bash', desc: 'Run a bash command' },
+    { cmd: '/exec', desc: 'Execute a command' }
+  ];
+
+  var cmdDropdownEl = null;
+  var cmdSelectedIdx = -1;
+
+  function showCommandDropdown(input) {
+    var text = input.value;
+    if (!text.startsWith('/')) { hideCommandDropdown(); return; }
+    var query = text.split(/\s/)[0].toLowerCase();
+    var matches = SLASH_COMMANDS.filter(function(c) { return c.cmd.startsWith(query); });
+    if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === query && text.indexOf(' ') !== -1)) {
+      hideCommandDropdown();
+      return;
+    }
+    if (!cmdDropdownEl) {
+      cmdDropdownEl = document.createElement('div');
+      cmdDropdownEl.id = 'oc-cmd-dropdown';
+      document.body.appendChild(cmdDropdownEl);
+    }
+    cmdSelectedIdx = Math.min(cmdSelectedIdx, matches.length - 1);
+    if (cmdSelectedIdx < 0) cmdSelectedIdx = 0;
+    var light = isLightTheme();
+    cmdDropdownEl.style.cssText = 'position:fixed;z-index:300;border-radius:8px;padding:4px;max-height:260px;overflow-y:auto;' +
+      (light ? 'background:#fff;border:1px solid #ddd;box-shadow:0 4px 16px rgba(0,0,0,0.1);' : 'background:#1a1d27;border:1px solid #333;box-shadow:0 4px 16px rgba(0,0,0,0.5);');
+    var rect = input.getBoundingClientRect();
+    cmdDropdownEl.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+    cmdDropdownEl.style.left = rect.left + 'px';
+    cmdDropdownEl.style.width = Math.min(rect.width, 380) + 'px';
+    cmdDropdownEl.innerHTML = matches.map(function(c, i) {
+      var sel = i === cmdSelectedIdx;
+      return '<div class="oc-cmd-item' + (sel ? ' selected' : '') + '" data-cmd="' + c.cmd + '" style="padding:6px 10px;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;gap:8px;' +
+        (sel ? (light ? 'background:#ecfdf5;' : 'background:#2a2a4a;') : '') + '">' +
+        '<span style="font-weight:600;font-size:13px;' + (light ? 'color:#333;' : 'color:#e0e0e0;') + '">' + escHtml(c.cmd) + '</span>' +
+        '<span style="font-size:11px;' + (light ? 'color:#999;' : 'color:#666;') + 'text-align:right;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(c.desc) + '</span>' +
+      '</div>';
+    }).join('');
+    cmdDropdownEl.querySelectorAll('.oc-cmd-item').forEach(function(item) {
+      item.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        var cmd = item.dataset.cmd;
+        input.value = cmd + ' ';
+        input.focus();
+        hideCommandDropdown();
+        updateCommandInputStyle(input);
+      });
+    });
+  }
+
+  function hideCommandDropdown() {
+    if (cmdDropdownEl) { cmdDropdownEl.remove(); cmdDropdownEl = null; }
+    cmdSelectedIdx = -1;
+  }
+
+  function navigateCommandDropdown(input, dir) {
+    if (!cmdDropdownEl) return false;
+    var items = cmdDropdownEl.querySelectorAll('.oc-cmd-item');
+    if (items.length === 0) return false;
+    cmdSelectedIdx += dir;
+    if (cmdSelectedIdx < 0) cmdSelectedIdx = items.length - 1;
+    if (cmdSelectedIdx >= items.length) cmdSelectedIdx = 0;
+    showCommandDropdown(input);
+    return true;
+  }
+
+  function acceptCommandSelection(input) {
+    if (!cmdDropdownEl) return false;
+    var items = cmdDropdownEl.querySelectorAll('.oc-cmd-item');
+    if (cmdSelectedIdx >= 0 && cmdSelectedIdx < items.length) {
+      var cmd = items[cmdSelectedIdx].dataset.cmd;
+      input.value = cmd + ' ';
+      hideCommandDropdown();
+      updateCommandInputStyle(input);
+      return true;
+    }
+    return false;
+  }
+
+  function updateCommandInputStyle(input) {
+    var isCmd = input.value.trim().startsWith('/');
+    input.classList.toggle('oc-cmd-mode', isCmd);
+  }
+
   function injectQueueStyles() {
     if (document.getElementById('oc-queue-styles')) return;
     var style = document.createElement('style');
@@ -1220,21 +1487,26 @@
       '.oc-queue-clear{background:none;border:1px solid #333;color:#888;font-size:10px;padding:2px 8px;border-radius:4px;cursor:pointer;}' +
       '.oc-queue-clear:hover{color:#ef4444;border-color:#ef4444;}' +
       '.oc-queue-items{display:flex;flex-direction:column;gap:4px;}' +
-      '.oc-queue-item{display:flex;align-items:flex-start;gap:6px;padding:6px 8px;background:#1a1a2e;border-radius:6px;border-left:3px solid #a78bfa;}' +
+      '.oc-queue-item{display:flex;align-items:flex-start;gap:6px;padding:8px 10px;background:#1a1a2e;border-radius:6px;border-left:3px solid #a78bfa;}' +
       '.oc-queue-num{font-size:9px;color:#a78bfa;font-weight:700;flex-shrink:0;width:14px;text-align:center;padding-top:5px;}' +
       '.oc-queue-input{flex:1;background:transparent;border:1px solid transparent;color:#ccc;font-size:12px;font-family:inherit;outline:none;padding:4px 6px;resize:none;overflow:hidden;border-radius:4px;line-height:1.5;}' +
       '.oc-queue-input:focus{color:#fff;border-color:#a78bfa33;background:#1a1a2e;}' +
-      '.oc-queue-actions{display:flex;flex-direction:column;gap:3px;flex-shrink:0;padding-top:2px;}' +
-      '.oc-queue-steer{background:#f59e0b;color:#000;border:none;font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;cursor:pointer;white-space:nowrap;}' +
+      '.oc-queue-actions{display:flex;gap:4px;flex-shrink:0;align-items:center;padding-top:2px;}' +
+      '.oc-queue-steer{background:#f59e0b;color:#000;border:none;font-size:10px;font-weight:700;padding:5px 10px;border-radius:5px;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px;}' +
       '.oc-queue-steer:hover{background:#d97706;}' +
-      '.oc-queue-cancel{background:none;border:none;color:#555;font-size:16px;cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0;}' +
-      '.oc-queue-cancel:hover{color:#ef4444;}' +
+      '.oc-queue-cancel{background:none;border:1px solid #444;color:#888;font-size:12px;cursor:pointer;padding:4px 8px;border-radius:5px;line-height:1;flex-shrink:0;transition:all 0.15s;}' +
+      '.oc-queue-cancel:hover{color:#ef4444;border-color:#ef4444;background:rgba(239,68,68,0.1);}' +
+      /* Command mode input styling */
+      '#oc-input.oc-cmd-mode{border-color:#a78bfa !important;background:rgba(167,139,250,0.06) !important;color:#c4b5fd !important;}' +
+      '[data-oc-theme="light"] #oc-input.oc-cmd-mode{border-color:#7c3aed !important;background:rgba(124,58,237,0.06) !important;color:#6d28d9 !important;}' +
       /* Light theme overrides */
       '[data-oc-theme="light"] #oc-queue{background:#f0f4ff;border-top-color:#e5e7eb;}' +
       '[data-oc-theme="light"] .oc-queue-item{background:#e8ecf5;}' +
       '[data-oc-theme="light"] .oc-queue-input{color:#333;}' +
       '[data-oc-theme="light"] .oc-queue-input:focus{color:#000;background:#fff;}' +
-      '[data-oc-theme="light"] .oc-queue-clear{border-color:#ccc;color:#666;}';
+      '[data-oc-theme="light"] .oc-queue-clear{border-color:#ccc;color:#666;}' +
+      '[data-oc-theme="light"] .oc-queue-cancel{border-color:#ccc;color:#999;}' +
+      '[data-oc-theme="light"] .oc-queue-cancel:hover{color:#dc2626;border-color:#dc2626;background:rgba(220,38,38,0.06);}';
     document.head.appendChild(style);
   }
 
@@ -1441,21 +1713,72 @@
       var maxH = Math.min(input.scrollHeight, 200); // Cap at 200px
       input.style.height = maxH + 'px';
     }
-    input.addEventListener('input', function() { updateInputCounter(input); autoResizeInput(); });
+    input.addEventListener('input', function() {
+      updateInputCounter(input); autoResizeInput();
+      updateCommandInputStyle(input);
+      showCommandDropdown(input);
+    });
+    input.addEventListener('blur', function() { setTimeout(hideCommandDropdown, 150); });
     input.addEventListener('keydown', function(e) {
+      // Arrow keys navigate command dropdown
+      if (cmdDropdownEl && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault();
+        navigateCommandDropdown(input, e.key === 'ArrowUp' ? -1 : 1);
+        return;
+      }
+      // Tab or Enter accepts command selection
+      if (cmdDropdownEl && (e.key === 'Tab')) {
+        e.preventDefault();
+        acceptCommandSelection(input);
+        return;
+      }
+      // Escape closes dropdown
+      if (cmdDropdownEl && e.key === 'Escape') {
+        e.preventDefault();
+        hideCommandDropdown();
+        return;
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        var text = input.value; input.value = ''; input.style.height = 'auto'; updateInputCounter(input); send(text);
+        hideCommandDropdown();
+        var text = input.value; input.value = ''; input.style.height = 'auto';
+        input.classList.remove('oc-cmd-mode');
+        updateInputCounter(input); send(text);
       }
     });
     if (sendBtn) sendBtn.addEventListener('click', function() {
       if (sending) { abortGeneration(); return; }
-      var text = input.value; input.value = ''; input.style.height = 'auto'; updateInputCounter(input); send(text);
+      hideCommandDropdown();
+      var text = input.value; input.value = ''; input.style.height = 'auto';
+      input.classList.remove('oc-cmd-mode');
+      updateInputCounter(input); send(text);
     });
     if (newChatBtn) newChatBtn.addEventListener('click', newChat);
     if (exportBtn) exportBtn.addEventListener('click', exportChat);
     if (searchBtn) searchBtn.addEventListener('click', toggleSearch);
     if (settingsBtn) settingsBtn.addEventListener('click', showSettings);
+
+    // Wire activity filter buttons (All / Tools / Agents)
+    document.querySelectorAll('.activity-tab, .artifact-tab').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var label = btn.textContent.trim().toLowerCase();
+        var key = label === 'all' ? 'all' : label === 'tools' ? 'tools' : label === 'agents' ? 'agents' : null;
+        if (key) toggleActivityFilter(key);
+      });
+    });
+
+    // Wire panel tabs (Activity / Cron)
+    document.querySelectorAll('.oc-panel-tab').forEach(function(tab) {
+      tab.addEventListener('click', function() {
+        switchPanelTab(tab.dataset.panel);
+      });
+    });
+    // Wire Cron nav icon to switch to cron tab
+    document.querySelectorAll('.nav-icon').forEach(function(el) {
+      if (el.dataset.label === 'Cron' || el.title === 'Cron') {
+        el.addEventListener('click', function() { switchPanelTab('cron'); });
+      }
+    });
   }
 
   // ── WebSocket for live gateway events (agent, tool, session stats) ──
@@ -1516,14 +1839,72 @@
             // Handle error responses (chat.send fail, abort fail, etc.)
             if (msg.error || msg.ok === false) {
               if (msg.id && msg.id.startsWith('cs-')) {
-                addActivity('error', 'Send failed: ' + (msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown'));
-                resetSendingState('Send failed: ' + (msg.error ? msg.error.message : 'unknown'));
+                var sendErrMsg = msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown';
+                addActivity('error', 'Send failed: ' + sendErrMsg);
+                // Recover the sent message — remove from history, put back in queue
+                var sendSess = getSession();
+                if (sendSess) {
+                  var recoveredText = '';
+                  for (var ri = sendSess.messages.length - 1; ri >= 0; ri--) {
+                    if (sendSess.messages[ri].role === 'user') {
+                      recoveredText = sendSess.messages[ri].content;
+                      sendSess.messages.splice(ri, 1);
+                      break;
+                    }
+                  }
+                  for (var rhi = sendSess.history.length - 1; rhi >= 0; rhi--) {
+                    if (sendSess.history[rhi].role === 'user') { sendSess.history.splice(rhi, 1); break; }
+                  }
+                  if (recoveredText) {
+                    messageQueue.unshift(recoveredText);
+                    saveQueue();
+                    addActivity('system', 'Message moved to queue (send failed: ' + sendErrMsg + ')');
+                  }
+                  saveAll();
+                  var sendContainer = document.getElementById('oc-messages');
+                  if (sendContainer) renderAllMessages(sendContainer);
+                }
+                sending = false;
+                restoreSendButton();
+                clearSendTimeout();
+                renderQueueUI();
               }
               if (msg.id && msg.id.startsWith('abort-')) {
                 addActivity('error', 'Abort failed: ' + (msg.error ? msg.error.message : 'unknown'));
               }
+              if (msg.id === 'cl') {
+                addActivity('error', 'Cron list failed: ' + (msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown'));
+              }
               if (msg.id && msg.id.startsWith('st-')) {
-                addActivity('error', 'Steer failed: ' + (msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown'));
+                var steerErrMsg = msg.error ? msg.error.message || JSON.stringify(msg.error) : 'unknown';
+                addActivity('system', 'Steer failed (' + steerErrMsg + '), moving message to editable queue');
+                // Remove the steer message from local history and put it back in the queue
+                var ls = getSession();
+                if (ls) {
+                  var removedText = '';
+                  for (var si = ls.messages.length - 1; si >= 0; si--) {
+                    if (ls.messages[si].role === 'user') {
+                      removedText = ls.messages[si].content;
+                      ls.messages.splice(si, 1);
+                      break;
+                    }
+                  }
+                  for (var shi = ls.history.length - 1; shi >= 0; shi--) {
+                    if (ls.history[shi].role === 'user') { ls.history.splice(shi, 1); break; }
+                  }
+                  if (removedText) {
+                    messageQueue.unshift(removedText);
+                    saveQueue();
+                  }
+                  saveAll();
+                  var container = document.getElementById('oc-messages');
+                  if (container) renderAllMessages(container);
+                }
+                // Reset sending state back — steer didn't go through
+                sending = false;
+                restoreSendButton();
+                clearSendTimeout();
+                renderQueueUI();
               }
             }
             // After connect success, fetch stats + history + models
@@ -1532,9 +1913,16 @@
               wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
               wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
               wsSend({ type: 'req', id: 'ml', method: 'models.list', params: {} });
+              wsSend({ type: 'req', id: 'cl', method: 'cron.list', params: { enabled: 'all', limit: 100, sortBy: 'nextRunAtMs', sortDir: 'asc' } });
               // Subscribe to real-time message events for this session (cross-tab sync)
               wsSend({ type: 'req', id: 'ms', method: 'sessions.messages.subscribe', params: { key: wsSessionKey } });
-              // Agent busy detection now handled by sessions.list response (status === 'running')
+              // Start periodic sessions.list polling to keep serverSessionRunning fresh
+              if (statusPollTimer) clearInterval(statusPollTimer);
+              statusPollTimer = setInterval(function() {
+                if (ws && ws.readyState === 1 && !sending) {
+                  wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
+                }
+              }, 15000);
             }
             // Handle sessions.list response → update stats + model subtitle + detect busy
             if (msg.id === 'sl' && msg.payload && msg.payload.sessions) {
@@ -1544,7 +1932,15 @@
                 if (msg.payload.sessions[si].key === wsSessionKey) { mainSess = msg.payload.sessions[si]; break; }
               }
               var agentRunning = mainSess && mainSess.status === 'running';
+              var wasRunning = serverSessionRunning;
               serverSessionRunning = agentRunning;
+
+              // Agent just became idle — process queued messages
+              if (wasRunning && !agentRunning && !sending && messageQueue.length > 0) {
+                addActivity('system', 'Agent idle — sending queued message');
+                wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+                processQueue();
+              }
 
               if (sending && wsChatRunId === 'pending-reload') {
                 if (!agentRunning) {
@@ -1565,8 +1961,8 @@
                     }
                   }, 5000);
                 }
-              } else if (!sending && agentRunning && wasBusy()) {
-                // Page reload while agent is still processing OUR message
+              } else if (!sending && agentRunning && (wasBusy() || recentExternalTrigger())) {
+                // Agent is running from our message, cron job, or external trigger — show thinking
                 enterPendingReloadState();
               }
               var sess = msg.payload.sessions;
@@ -1594,6 +1990,15 @@
             if (msg.id === 'ml' && msg.payload && msg.payload.models) {
               availableModels = msg.payload.models;
               renderModelPicker();
+            }
+            // Handle cron.list response
+            if (msg.id === 'cl') {
+              if (msg.payload) {
+                cronJobs = msg.payload.jobs || msg.payload.items || (Array.isArray(msg.payload) ? msg.payload : []);
+              } else {
+                cronJobs = [];
+              }
+              renderCronPanel();
             }
             // Handle sessions.create response → link local session to server key
             if (msg.id && msg.id.startsWith('sc-') && msg.payload && msg.payload.key) {
@@ -1625,6 +2030,8 @@
 
       ws.onclose = function() {
         ws = null; wsHasReadScope = false;
+        if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+        serverSessionRunning = false;
         if (sending) resetSendingState('WebSocket disconnected during generation');
         setTimeout(function() { connectWs(); }, 5000);
       };
@@ -1740,11 +2147,20 @@
       if (window.ocUpdateStats) window.ocUpdateStats(payload);
     }
 
-    // Real-time session message — just trigger a history refresh to stay in sync
+    // Real-time session message — trigger a debounced history refresh to stay in sync
     if (event === 'session.message' && payload && payload.sessionKey === wsSessionKey) {
-      // Debounce: don't re-fetch if we just sent a message ourselves
-      if (!sending || wsChatRunId === 'pending-reload') {
+      lastExternalTriggerMs = Date.now();
+      // Skip if actively streaming (the streaming handler already manages the display)
+      if (sending && wsChatRunId && wsChatRunId !== 'pending-reload') return;
+      // Debounce: coalesce rapid session.message events into one history fetch
+      if (sessionMsgDebounce) clearTimeout(sessionMsgDebounce);
+      sessionMsgDebounce = setTimeout(function() {
+        sessionMsgDebounce = null;
         wsSend({ type: 'req', id: 'ch', method: 'chat.history', params: { sessionKey: wsSessionKey, limit: 100 } });
+      }, 2000);
+      // Also check if agent just started running (e.g. from cron job or external trigger)
+      if (!sending) {
+        wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
       }
     }
 
@@ -1756,6 +2172,16 @@
         if (tRunId && agentRuns[tRunId]) {
           addAgentLog(tRunId, 'tool', (td.name || td.title || 'unknown'));
         }
+      }
+    }
+
+    // Live cron events — refresh the panel and check agent status
+    if (event === 'cron') {
+      lastExternalTriggerMs = Date.now();
+      if (cronPanelVisible) fetchCronJobs();
+      // Cron fired — agent likely started, check immediately
+      if (!sending) {
+        wsSend({ type: 'req', id: 'sl', method: 'sessions.list', params: { limit: 5 } });
       }
     }
   }
@@ -1770,6 +2196,8 @@
   function loadServerHistory(serverMsgs) {
     var s = getSession();
     if (!s || !serverMsgs) return;
+    // Don't re-render while actively streaming (would destroy the streaming element)
+    if (sending && wsChatBotEl && wsChatGotFirst) return;
     var container = document.getElementById('oc-messages');
 
     var serverParsed = serverMsgs.map(function(m) {
@@ -1796,8 +2224,54 @@
     }
 
     if (!inSync && serverLen > 0) {
-      s.messages = serverParsed.slice();
-      s.history = serverParsed.slice();
+      // Preserve locally-interrupted messages (from steer) that server won't have
+      var interrupted = s.messages.filter(function(m) { return m.interrupted; });
+      // Preserve recently sent message if not yet on server (within 60s)
+      var pendingLocal = [];
+      if (lastSentMsg && (Date.now() - lastSentMsg.time < 60000)) {
+        var sentText = lastSentMsg.text;
+        // Check if server already has this message
+        var serverHasIt = false;
+        for (var sci = 0; sci < serverParsed.length; sci++) {
+          if (serverParsed[sci].role === 'user' && serverParsed[sci].content === sentText) {
+            serverHasIt = true;
+            break;
+          }
+        }
+        if (!serverHasIt) {
+          // Also check with stripped metadata (server may have added metadata)
+          var strippedSent = stripServerMetadata(sentText);
+          for (var sci2 = 0; sci2 < serverParsed.length; sci2++) {
+            if (serverParsed[sci2].role === 'user' && serverParsed[sci2].content === strippedSent) {
+              serverHasIt = true;
+              break;
+            }
+          }
+        }
+        if (!serverHasIt) {
+          pendingLocal.push({ role: 'user', content: sentText, time: lastSentMsg.time });
+        } else {
+          lastSentMsg = null; // Server has it, no need to track anymore
+        }
+      }
+      var merged = serverParsed.slice();
+      // Re-insert interrupted messages at their chronological positions
+      for (var ii = 0; ii < interrupted.length; ii++) {
+        var im = interrupted[ii];
+        var inserted = false;
+        for (var jj = 0; jj < merged.length; jj++) {
+          if (merged[jj].time && im.time && merged[jj].time > im.time) {
+            merged.splice(jj, 0, im);
+            inserted = true;
+            break;
+          }
+        }
+        if (!inserted) merged.push(im);
+      }
+      // Append pending local messages (sent but not yet on server)
+      for (var pi = 0; pi < pendingLocal.length; pi++) merged.push(pendingLocal[pi]);
+      s.messages = merged;
+      s.history = merged.slice();
       if (container) renderAllMessages(container);
       saveAll();
       scrollBottom(container);
@@ -1863,6 +2337,124 @@
     addActivity('system', 'Model → ' + modelId);
   }
 
+  // ── Cron panel ──
+  var cronJobs = [];
+  var cronPanelVisible = false;
+
+  function fetchCronJobs() {
+    if (!wsHasReadScope || !ws || ws.readyState !== 1) return;
+    wsSend({ type: 'req', id: 'cl', method: 'cron.list', params: { enabled: 'all', limit: 100, sortBy: 'nextRunAtMs', sortDir: 'asc' } });
+  }
+
+  function formatCronSchedule(sched) {
+    if (!sched) return '—';
+    if (sched.kind === 'at') return 'Once: ' + (sched.at || '—');
+    if (sched.kind === 'every') {
+      var ms = sched.everyMs;
+      if (ms >= 86400000) return 'Every ' + Math.round(ms / 86400000) + 'd';
+      if (ms >= 3600000) return 'Every ' + Math.round(ms / 3600000) + 'h';
+      if (ms >= 60000) return 'Every ' + Math.round(ms / 60000) + 'm';
+      return 'Every ' + Math.round(ms / 1000) + 's';
+    }
+    return JSON.stringify(sched);
+  }
+
+  function formatCronTime(ms) {
+    if (!ms) return '—';
+    var d = new Date(ms);
+    var now = Date.now();
+    var diff = ms - now;
+    var rel = '';
+    if (diff > 0) {
+      if (diff < 60000) rel = 'in ' + Math.round(diff / 1000) + 's';
+      else if (diff < 3600000) rel = 'in ' + Math.round(diff / 60000) + 'm';
+      else if (diff < 86400000) rel = 'in ' + Math.round(diff / 3600000) + 'h';
+      else rel = 'in ' + Math.round(diff / 86400000) + 'd';
+    } else {
+      var ago = -diff;
+      if (ago < 60000) rel = Math.round(ago / 1000) + 's ago';
+      else if (ago < 3600000) rel = Math.round(ago / 60000) + 'm ago';
+      else if (ago < 86400000) rel = Math.round(ago / 3600000) + 'h ago';
+      else rel = Math.round(ago / 86400000) + 'd ago';
+    }
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' (' + rel + ')';
+  }
+
+  function renderCronPanel() {
+    var listEl = document.getElementById('oc-cron-list');
+    var countEl = document.getElementById('oc-cron-count');
+    if (!listEl) return;
+    if (countEl) countEl.textContent = cronJobs.length + ' job' + (cronJobs.length !== 1 ? 's' : '');
+    if (cronJobs.length === 0) {
+      listEl.innerHTML = '<div class="cron-empty">No scheduled jobs</div>';
+      return;
+    }
+    listEl.innerHTML = cronJobs.map(function(job) {
+      var st = job.state || {};
+      var statusClass = st.lastRunStatus === 'ok' ? 'cron-status-ok' :
+                        st.lastRunStatus === 'error' ? 'cron-status-error' :
+                        st.lastRunStatus === 'skipped' ? 'cron-status-skipped' : '';
+      var toggleTitle = job.enabled ? 'Click to disable this job' : 'Click to enable this job';
+      var badge = job.enabled
+        ? '<button class="cron-badge cron-badge-enabled cron-toggle" data-cron-id="' + escHtml(job.id) + '" data-cron-name="' + escHtml(job.name || job.id) + '" data-cron-enabled="true" title="' + toggleTitle + '">ON</button>'
+        : '<button class="cron-badge cron-badge-disabled cron-toggle" data-cron-id="' + escHtml(job.id) + '" data-cron-name="' + escHtml(job.name || job.id) + '" data-cron-enabled="false" title="' + toggleTitle + '">OFF</button>';
+      var meta = [];
+      if (st.nextRunAtMs) meta.push('<span>Next: ' + formatCronTime(st.nextRunAtMs) + '</span>');
+      if (st.lastRunAtMs) meta.push('<span class="' + statusClass + '">Last: ' + formatCronTime(st.lastRunAtMs) + (st.lastRunStatus ? ' (' + st.lastRunStatus + ')' : '') + '</span>');
+      if (st.lastDurationMs) meta.push('<span>Took: ' + (st.lastDurationMs >= 1000 ? (st.lastDurationMs / 1000).toFixed(1) + 's' : st.lastDurationMs + 'ms') + '</span>');
+      if (st.lastError) meta.push('<span class="cron-status-error" title="' + escHtml(st.lastError) + '">Err: ' + escHtml(st.lastError.length > 30 ? st.lastError.slice(0, 30) + '...' : st.lastError) + '</span>');
+      return '<div class="cron-item">' +
+        '<div class="cron-item-name">' + badge + ' ' + escHtml(job.name || job.id) + '</div>' +
+        '<div class="cron-item-schedule">' + escHtml(formatCronSchedule(job.schedule)) +
+          (job.sessionTarget ? ' → ' + escHtml(job.sessionTarget) : '') + '</div>' +
+        (job.description ? '<div class="cron-item-schedule" style="font-family:inherit;color:#777;">' + escHtml(job.description) + '</div>' : '') +
+        (meta.length > 0 ? '<div class="cron-item-meta">' + meta.join('') + '</div>' : '') +
+      '</div>';
+    }).join('');
+    // Wire toggle buttons
+    listEl.querySelectorAll('.cron-toggle').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var jobName = btn.dataset.cronName;
+        var isEnabled = btn.dataset.cronEnabled === 'true';
+        var action = isEnabled ? 'disable' : 'enable';
+        var cmd = '/cron ' + action + ' ' + jobName;
+        // Send as chat message to OpenClaw
+        send(cmd);
+        // Optimistic UI update
+        btn.textContent = isEnabled ? 'OFF' : 'ON';
+        btn.className = 'cron-badge cron-toggle ' + (isEnabled ? 'cron-badge-disabled' : 'cron-badge-enabled');
+        btn.dataset.cronEnabled = isEnabled ? 'false' : 'true';
+        btn.title = isEnabled ? 'Click to enable this job' : 'Click to disable this job';
+        // Refresh after a delay to get server state
+        setTimeout(fetchCronJobs, 5000);
+      });
+    });
+  }
+
+  function switchPanelTab(tabName) {
+    var panel = document.getElementById('oc-cron-panel');
+    var activityView = document.getElementById('oc-activity-view');
+    if (!panel) return;
+    cronPanelVisible = (tabName === 'cron');
+    // Update tab active states
+    document.querySelectorAll('.oc-panel-tab').forEach(function(t) {
+      t.classList.toggle('active', t.dataset.panel === tabName);
+    });
+    if (cronPanelVisible) {
+      panel.classList.add('active');
+      if (activityView) activityView.classList.add('hidden');
+      fetchCronJobs();
+    } else {
+      panel.classList.remove('active');
+      if (activityView) activityView.classList.remove('hidden');
+    }
+  }
+
+  function toggleCronPanel() {
+    switchPanelTab(cronPanelVisible ? 'activity' : 'cron');
+  }
+
   window.ocSend = send;
   window.ocNewChat = newChat;
   window.ocExportChat = exportChat;
@@ -1873,6 +2465,7 @@
   window.ocClearAllSessions = clearAllSessions;
   window.ocAbortGeneration = abortGeneration;
   window.ocSwitchModel = switchModel;
+  window.ocToggleCronPanel = toggleCronPanel;
 
   // ── Cross-tab sync via storage event ──
   // When another tab changes localStorage, re-render to stay in sync
@@ -1881,7 +2474,8 @@
     var container = document.getElementById('oc-messages');
 
     if (e.key === STORE_KEY) {
-      // Sessions/messages changed in another tab
+      // Sessions/messages changed in another tab — skip during active streaming
+      if (sending && wsChatBotEl && wsChatGotFirst) return;
       try {
         if (e.newValue) {
           sessions = JSON.parse(e.newValue);

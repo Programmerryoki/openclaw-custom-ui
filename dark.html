@@ -462,6 +462,110 @@
             min-height: 80px;
         }
 
+        /* Panel-level tabs (Activity / Cron) */
+        .oc-panel-tabs { display: flex; gap: 0; }
+        .oc-panel-tab {
+            padding: 4px 12px;
+            font-size: 11px;
+            color: #666;
+            background: none;
+            border: 1px solid #333;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .oc-panel-tab:first-child { border-radius: 6px 0 0 6px; }
+        .oc-panel-tab:last-child { border-radius: 0 6px 6px 0; }
+        .oc-panel-tab:not(:first-child) { border-left: none; }
+        .oc-panel-tab:hover { color: #aaa; }
+        .oc-panel-tab.active { background: #1a1a2e; color: #667eea; border-color: #667eea; }
+
+        /* Activity view holds the filter tabs + activity list */
+        #oc-activity-view {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        #oc-activity-view.hidden { display: none; }
+
+        /* Cron jobs panel */
+        #oc-cron-panel {
+            display: none;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        #oc-cron-panel.active { display: flex; }
+        .cron-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid #1e1e2e;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .cron-header-title { font-weight: 600; font-size: 14px; color: #e0e0e0; }
+        .cron-header-count { font-size: 11px; color: #666; }
+        .cron-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+        .cron-item {
+            padding: 10px 16px;
+            border-bottom: 1px solid #1a1a2a;
+            cursor: default;
+            transition: background 0.1s;
+        }
+        .cron-item:hover { background: rgba(102,126,234,0.06); }
+        .cron-item-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e0e0e0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .cron-item-name .cron-badge {
+            font-size: 9px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 700;
+            text-transform: uppercase;
+            border: none;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .cron-badge-enabled { background: rgba(34,197,94,0.15); color: #22c55e; }
+        .cron-badge-enabled:hover { background: rgba(34,197,94,0.3); }
+        .cron-badge-disabled { background: rgba(239,68,68,0.15); color: #ef4444; }
+        .cron-badge-disabled:hover { background: rgba(239,68,68,0.3); }
+        .cron-item-schedule {
+            font-size: 11px;
+            color: #888;
+            margin-top: 3px;
+            font-family: Consolas, Monaco, monospace;
+        }
+        .cron-item-meta {
+            font-size: 10px;
+            color: #555;
+            margin-top: 4px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .cron-item-meta span { white-space: nowrap; }
+        .cron-status-ok { color: #22c55e; }
+        .cron-status-error { color: #ef4444; }
+        .cron-status-skipped { color: #f59e0b; }
+        .cron-empty {
+            padding: 32px 16px;
+            text-align: center;
+            color: #555;
+            font-size: 13px;
+        }
+
         /* Agent stream logs in bottom half */
         #oc-agent-logs {
             display: none;
@@ -556,13 +660,28 @@
         <div class="activity oc-activity-panel">
             <div class="activity-header">
                 <div class="activity-title">Activity</div>
+                <div class="oc-panel-tabs">
+                    <button class="oc-panel-tab active" data-panel="activity">Activity</button>
+                    <button class="oc-panel-tab" data-panel="cron">Cron</button>
+                </div>
+            </div>
+            <!-- Activity view -->
+            <div id="oc-activity-view">
                 <div class="activity-tabs">
                     <button class="activity-tab active">All</button>
                     <button class="activity-tab">Tools</button>
                     <button class="activity-tab">Agents</button>
                 </div>
+                <div id="oc-activity"></div>
             </div>
-            <div id="oc-activity"></div>
+            <!-- Cron view -->
+            <div id="oc-cron-panel">
+                <div class="cron-header">
+                    <span class="cron-header-title">Scheduled Jobs</span>
+                    <span class="cron-header-count" id="oc-cron-count"></span>
+                </div>
+                <div class="cron-list" id="oc-cron-list"></div>
+            </div>
         </div>
 
     </div>
